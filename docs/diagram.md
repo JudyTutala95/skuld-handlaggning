@@ -9,7 +9,7 @@ IntelliJ/VS Code (med Mermaid-tillägg). Läs dem uppifrån och ned: från helhe
 4. [Processkedjan: från krav till betald skuld](#4-processkedjan-från-krav-till-betald-skuld)
 5. [Statusflöden](#5-statusflöden)
 6. [Klassdiagram: ärenden](#6-klassdiagram-ärenden)
-7. [Klassdiagram: användningsfall och controllers](#7-klassdiagram-användningsfall-och-controllers)
+7. [Klassdiagram: ärendemodulens lager](#7-klassdiagram-ärendemodulens-lager)
 8. [Klassdiagram: gäldenär, regelverk och notifiering](#8-klassdiagram-gäldenär-regelverk-och-notifiering)
 9. [Sekvens: delgivning och brev](#9-sekvens-delgivning-och-brev)
 10. [Sekvens: löneutmätning över modulgränsen](#10-sekvens-löneutmätning-över-modulgränsen)
@@ -48,17 +48,20 @@ flowchart LR
 
 ## 2. Moduler och beroenden
 
-Varje modul är ett paket. Pilarna visar vem som **får** anropa vem – Spring Modulith
-kontrollerar det i `ModulStrukturTest`. Inga cykler: `arende` vet inte att `notifiering` finns.
+Varje modul är ett paket. Det som ligger **direkt i modulens paket** är dess publika API;
+allt i underpaketen (`web`, `service`, `domain` …) är internt. Pilarna visar vem som **får**
+anropa vem – Spring Modulith kontrollerar det i `ModulStrukturTest`.
 
 ```mermaid
 flowchart TB
     subgraph arende["📁 arende"]
-        A_API["Publikt API<br/>ArendeRegistrering · ArendeUppslag<br/>…Handlaggning · ArendeStatusAndrad"]
+        A_API["Publikt API<br/>ArendeStatusAndrad · Arendestatus · Arendetyp"]
+        A_INT["internt: web · dto · service · domain · repository"]
     end
 
     subgraph galdenar["📁 galdenar"]
-        G_API["Publikt API<br/>GaldenarRegistrering · GaldenarUppslag<br/>GaldenarEkonomi · Personnummer"]
+        G_API["Publikt API<br/>GaldenarApi"]
+        G_INT["internt: web · dto · service · domain · repository"]
     end
 
     subgraph regelverk["📁 regelverk (ren Java)"]
@@ -73,10 +76,10 @@ flowchart TB
         C["Kalender · GlobalFelhanterare<br/>RegelbrottException · HittadesInteException"]
     end
 
-    arende -->|"kontrollerar gäldenär,<br/>hämtar förbehållsbelopp"| galdenar
-    arende -->|preskription| regelverk
-    galdenar -->|förbehållsbelopp| regelverk
-    arende -. "händelse: ArendeStatusAndrad" .-> notifiering
+    A_INT -->|"GaldenarApi:<br/>kontrolleraAttFinns,<br/>forbehallsberakning"| G_API
+    A_INT -->|preskription| regelverk
+    G_INT -->|förbehållsbelopp| regelverk
+    A_API -. "händelse: ArendeStatusAndrad" .-> N
     arende --> common
     galdenar --> common
 ```
@@ -85,29 +88,53 @@ flowchart TB
 
 ## 3. Lagren i ett anrop
 
-Samma väg för alla anrop. Varje låda är en egen klass med ett ansvar.
+Varje modul är uppdelad i samma lager. Pilarna är de **enda** tillåtna beroendena –
+`LagerArkitekturTest` (ArchUnit) underkänner bygget om någon bryter mot dem.
 
 ```mermaid
-flowchart LR
+flowchart TB
     HTTP(["HTTP-anrop<br/>JSON"])
-    CTRL["Controller<br/>tar emot DTO<br/>validerar med @Valid"]
-    UC["Användningsfall<br/>t.ex. BetalningsforelaggandeHandlaggning"]
-    LAGER["Arendelager<br/>hämta / spara"]
-    DOM["Domänobjekt<br/>t.ex. Betalningsforelaggande<br/>⚖️ affärsreglerna"]
-    REPO["ArendeRepository<br/>Spring Data JPA"]
-    DB[("Databas")]
-    MAP["ArendeSvarMapper"]
-    SVAR(["HTTP-svar<br/>ArendeSvar som JSON"])
-    FEL["GlobalFelhanterare<br/>→ Problem Details"]
 
-    HTTP --> CTRL --> UC
-    UC -->|1. hämta| LAGER --> REPO --> DB
-    UC -->|2. utför| DOM
-    UC -->|3. spara| LAGER
-    UC --> MAP --> SVAR
+    subgraph web["web"]
+        CTRL["*Controller<br/>tar emot Request-DTO, @Valid"]
+    end
+    subgraph dto["dto"]
+        REQ["*Request · *Response<br/>records"]
+    end
+    subgraph service["service"]
+        SVC["*Service<br/>ett användningsfall, @Transactional"]
+        MAP["*Mapper<br/>DTO ⇄ domän"]
+        HAMT["ArendeHamtare<br/>hämta med typkontroll"]
+    end
+    subgraph domain["domain"]
+        DOM["Entiteter och värdeobjekt<br/>⚖️ affärsreglerna"]
+    end
+    subgraph repository["repository"]
+        REPO["*Repository<br/>Spring Data JPA"]
+    end
+    DB[("Databas")]
+    FEL["GlobalFelhanterare<br/>(common) → Problem Details"]
+
+    HTTP --> CTRL
+    CTRL --> SVC
+    CTRL -.-> REQ
+    SVC --> MAP
+    SVC --> HAMT --> REPO --> DB
+    SVC -->|"låter domänen<br/>göra jobbet"| DOM
+    MAP -.-> REQ
+    MAP -.-> DOM
+    REPO -.-> DOM
     DOM -. "RegelbrottException" .-> FEL
-    FEL -. "409 Conflict" .-> SVAR
+    FEL -. "409 Conflict" .-> HTTP
 ```
+
+| Lager | Får använda | Får inte använda |
+|---|---|---|
+| `web` | `service`, `dto` | `repository`, `domain` |
+| `service` | `repository`, `domain`, `dto`, andra modulers API | `web` |
+| `repository` | `domain` | `service`, `web`, `dto` |
+| `domain` | `regelverk`, `common` | alla lager ovan |
+| `dto` | – | alla lager |
 
 ---
 
@@ -336,125 +363,155 @@ classDiagram
 
 ---
 
-## 7. Klassdiagram: användningsfall och controllers
+## 7. Klassdiagram: ärendemodulens lager
 
-En controller och ett användningsfall per process. Alla delar på `Arendelager` (hämta/spara)
-och `ArendeSvarMapper` (svar).
+En controller och en service per process. Alla services delar på `ArendeHamtare` (hämta/spara via
+repository) och `ArendeMapper` (DTO ⇄ domän). Gäldenärsmodulen nås bara via `GaldenarApi`.
 
 ```mermaid
 classDiagram
     direction LR
 
-    class ArendeController
-    class BetalningsforelaggandeController
-    class UtsokningController
-    class SkuldsaneringController
-
-    class ArendeRegistrering {
-        +registrera(kommando) ArendeSvar
-    }
-    class ArendeUppslag {
-        +hamta(id) ArendeSvar
-        +arbetslista(galdenarId, status) List
-    }
-    class GemensammaAtgarder {
-        +paborjaUtredning(id)
-        +avskriv(id, orsak)
-    }
-    class BetalningsforelaggandeHandlaggning {
-        +delge(id, datum)
-        +bestrid(id, datum, grund)
-        +meddelaUtslag(id)
-        +overlamnaTillTingsratt(id)
-        +verkstall(id, handlaggare)
-    }
-    class UtsokningHandlaggning {
-        +beslutaLoneutmatning(id)
-        +registreraInbetalning(id, inbetalning)
-        +markeraPreskriberat(id)
-    }
-    class SkuldsaneringHandlaggning {
-        +bevilja(id, motivering)
-        +avsla(id, motivering)
-        +slutfor(id)
+    namespace web {
+        class ArendeController
+        class BetalningsforelaggandeController
+        class UtsokningController
+        class SkuldsaneringController
     }
 
-    class Arendelager {
-        +hamta(id) Arende
-        +hamta(id, typ) T
-        +spara(arende) T
-    }
-    class ArendeFabrik {
-        +skapa(typ, ...) Arende
-    }
-    class ArendeSvarMapper {
-        +tillSvar(arende) ArendeSvar
-        +tillRad(arende) ArendeRad
-    }
-    class ArendeRepository {
-        <<Spring Data JPA>>
-    }
-    class Kalender {
-        <<common>>
-        +idag() LocalDate
-    }
-    class GaldenarUppslag {
-        <<galdenar>>
-    }
-    class GaldenarEkonomi {
-        <<galdenar>>
+    namespace service {
+        class ArendeRegistreringService {
+            +registrera(RegistreraArendeRequest) ArendeResponse
+        }
+        class ArendeSokService {
+            +hamta(id) ArendeResponse
+            +arbetslista(galdenarId, status) List
+        }
+        class ArendeAtgardService {
+            +paborjaUtredning(id) ArendeResponse
+            +avskriv(id, AvskrivningRequest) ArendeResponse
+        }
+        class BetalningsforelaggandeService {
+            +delge(id, DelgivningRequest)
+            +bestrid(id, BestridandeRequest)
+            +meddelaUtslag(id)
+            +overlamnaTillTingsratt(id)
+            +verkstall(id, VerkstallighetRequest)
+        }
+        class UtsokningService {
+            +beslutaLoneutmatning(id)
+            +registreraInbetalning(id, InbetalningRequest)
+            +markeraPreskriberat(id)
+        }
+        class SkuldsaneringService {
+            +besluta(id, SkuldsaneringsbeslutRequest)
+            +slutfor(id)
+        }
+        class ArendeHamtare {
+            +hamta(id) Arende
+            +hamta(id, typ) T
+            +spara(arende) T
+        }
+        class ArendeMapper {
+            +tillFordran(request)$ Fordran
+            +tillInbetalning(request)$ Inbetalning
+            +tillResponse(arende)$ ArendeResponse
+            +tillRad(arende)$ ArendeRadResponse
+        }
     }
 
-    ArendeController --> ArendeRegistrering
-    ArendeController --> ArendeUppslag
-    ArendeController --> GemensammaAtgarder
-    BetalningsforelaggandeController --> BetalningsforelaggandeHandlaggning
-    UtsokningController --> UtsokningHandlaggning
-    SkuldsaneringController --> SkuldsaneringHandlaggning
+    namespace repository {
+        class ArendeRepository {
+            <<interface>>
+            +sok(galdenarId, status) List
+        }
+    }
 
-    ArendeRegistrering --> ArendeFabrik
-    ArendeRegistrering --> GaldenarUppslag
-    UtsokningHandlaggning --> GaldenarEkonomi
+    namespace domain {
+        class ArendeFabrik {
+            +skapa(typ, ...)$ Arende
+        }
+        class Arende {
+            <<abstract>>
+        }
+    }
 
-    ArendeRegistrering --> Arendelager
-    ArendeUppslag --> Arendelager
-    GemensammaAtgarder --> Arendelager
-    BetalningsforelaggandeHandlaggning --> Arendelager
-    UtsokningHandlaggning --> Arendelager
-    SkuldsaneringHandlaggning --> Arendelager
-    Arendelager --> ArendeRepository
+    class GaldenarApi {
+        <<interface>>
+        +kontrolleraAttFinns(id)
+        +forbehallsberakning(id)
+    }
 
-    BetalningsforelaggandeHandlaggning ..> ArendeSvarMapper
-    UtsokningHandlaggning ..> ArendeSvarMapper
-    SkuldsaneringHandlaggning ..> ArendeSvarMapper
-    BetalningsforelaggandeHandlaggning ..> Kalender
-    UtsokningHandlaggning ..> Kalender
-    SkuldsaneringHandlaggning ..> Kalender
+    ArendeController --> ArendeRegistreringService
+    ArendeController --> ArendeSokService
+    ArendeController --> ArendeAtgardService
+    BetalningsforelaggandeController --> BetalningsforelaggandeService
+    UtsokningController --> UtsokningService
+    SkuldsaneringController --> SkuldsaneringService
+
+    ArendeRegistreringService --> ArendeFabrik
+    ArendeRegistreringService --> GaldenarApi
+    UtsokningService --> GaldenarApi
+
+    ArendeRegistreringService --> ArendeHamtare
+    ArendeSokService --> ArendeHamtare
+    ArendeAtgardService --> ArendeHamtare
+    BetalningsforelaggandeService --> ArendeHamtare
+    UtsokningService --> ArendeHamtare
+    SkuldsaneringService --> ArendeHamtare
+    ArendeSokService --> ArendeRepository
+    ArendeHamtare --> ArendeRepository
+    ArendeRepository ..> Arende
+
+    BetalningsforelaggandeService ..> ArendeMapper
+    UtsokningService ..> ArendeMapper
+    SkuldsaneringService ..> ArendeMapper
 ```
 
 ---
 
 ## 8. Klassdiagram: gäldenär, regelverk och notifiering
 
+`GaldenarApi` ligger direkt i modulens paket och är det enda andra moduler ser.
+
 ```mermaid
 classDiagram
     direction LR
 
-    namespace galdenar {
+    class GaldenarApi {
+        <<interface>>
+        +kontrolleraAttFinns(id)
+        +forbehallsberakning(id) Forbehallsberakning
+    }
+
+    namespace galdenar_web {
         class GaldenarController
         class GaldenarEkonomiController
-        class GaldenarRegistrering {
-            +registrera(kommando) GaldenarSvar
+    }
+
+    namespace galdenar_service {
+        class GaldenarApiService
+        class GaldenarRegistreringService {
+            +registrera(RegistreraGaldenarRequest) GaldenarResponse
         }
-        class GaldenarUppslag {
-            +hamta(id) GaldenarSvar
-            +sokPaPersonnummer(text) GaldenarSvar
-            +kontrolleraAttFinns(id)
+        class GaldenarSokService {
+            +hamta(id) GaldenarResponse
+            +sok(SokGaldenarRequest) GaldenarResponse
         }
-        class GaldenarEkonomi {
-            +uppdatera(id, kommando) GaldenarSvar
+        class GaldenarEkonomiService {
+            +uppdatera(id, UppdateraEkonomiRequest) GaldenarResponse
             +forbehallsberakning(id) Forbehallsberakning
         }
+        class GaldenarMapper
+    }
+
+    namespace galdenar_repository {
+        class GaldenarRepository {
+            <<interface>>
+        }
+    }
+
+    namespace galdenar_domain {
         class Galdenar {
             <<entity>>
             -String fornamn
@@ -511,15 +568,22 @@ classDiagram
         class LoggandeBrevlada
     }
 
-    GaldenarController --> GaldenarRegistrering
-    GaldenarController --> GaldenarUppslag
-    GaldenarEkonomiController --> GaldenarEkonomi
-    GaldenarEkonomi --> GaldenarUppslag
+    GaldenarController --> GaldenarRegistreringService
+    GaldenarController --> GaldenarSokService
+    GaldenarEkonomiController --> GaldenarEkonomiService
+    GaldenarEkonomiService --> GaldenarSokService
+    GaldenarApi <|.. GaldenarApiService
+    GaldenarApiService --> GaldenarSokService
+    GaldenarApiService --> GaldenarEkonomiService
+    GaldenarRegistreringService --> GaldenarRepository
+    GaldenarSokService --> GaldenarRepository
+    GaldenarRegistreringService ..> GaldenarMapper
+    GaldenarRepository ..> Galdenar
     Galdenar *-- Personnummer
     Galdenar *-- Ekonomi
     Personnummer ..> Luhn
     Ekonomi ..> Hushall : skapar
-    GaldenarEkonomi ..> Forbehallsbelopp
+    GaldenarEkonomiService ..> Forbehallsbelopp
     Forbehallsbelopp ..> Normalbelopp
     Forbehallsbelopp ..> Hushall
     Forbehallsbelopp ..> Forbehallsberakning : skapar
@@ -541,23 +605,23 @@ sequenceDiagram
     autonumber
     actor H as Handläggare
     participant C as BetalningsforelaggandeController
-    participant UC as BetalningsforelaggandeHandlaggning
-    participant L as Arendelager
+    participant UC as BetalningsforelaggandeService
+    participant L as ArendeHamtare
     participant BF as Betalningsforelaggande
     participant DB as Databas
     participant N as BrevUtskick
     participant BL as Brevlada
 
     H->>C: POST /api/arenden/1/delgivning {"datum": "2026-05-10"}
-    C->>C: @Valid Delgivning
-    C->>UC: delge(1, 2026-05-10)
+    C->>C: @Valid DelgivningRequest
+    C->>UC: delge(1, DelgivningRequest)
     activate UC
     Note over UC,DB: @Transactional startar
     UC->>L: hamta(1, Betalningsforelaggande.class)
     L->>DB: SELECT … FROM arende WHERE id = 1
     DB-->>L: rad med typ = BETALNINGSFORELAGGANDE
     L-->>UC: Betalningsforelaggande
-    UC->>BF: delge(2026-05-10, idag)
+    UC->>BF: delge(request.datum(), idag)
     activate BF
     BF->>BF: kontrolleraInteIFramtiden()
     BF->>BF: bytStatus(DELGIVET) – kontrollerar Statusflode
@@ -568,7 +632,7 @@ sequenceDiagram
     L->>DB: UPDATE arende … / INSERT arende_dagbok
     Note over L: Spring Data publicerar ArendeStatusAndrad
     Note over UC,DB: COMMIT
-    UC-->>C: ArendeSvar (via ArendeSvarMapper)
+    UC-->>C: ArendeResponse (via ArendeMapper)
     deactivate UC
     C-->>H: 200 OK + JSON
 
@@ -599,27 +663,30 @@ sequenceDiagram
 ## 10. Sekvens: löneutmätning över modulgränsen
 
 Ärendemodulen frågar gäldenärsmodulen, som frågar regelverket. Ingen modul rör en annan
-moduls entiteter – bara deras publika tjänster.
+moduls entiteter eller services – bara dess publika API (`GaldenarApi`).
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor H as Handläggare
-    participant UC as UtsokningHandlaggning<br/>(arende)
+    participant UC as UtsokningService<br/>(arende)
     participant UTS as Utsokningsarende<br/>(arende)
-    participant GE as GaldenarEkonomi<br/>(galdenar)
+    participant API as GaldenarApi<br/>(galdenar, publikt)
+    participant GE as GaldenarEkonomiService<br/>(galdenar.service)
     participant E as Ekonomi<br/>(galdenar)
     participant FB as Forbehallsbelopp<br/>(regelverk)
 
     H->>UC: POST /api/arenden/2/loneutmatning
     UC->>UC: hamta(2) som Utsokningsarende
-    UC->>GE: forbehallsberakning(galdenarId)
+    UC->>API: forbehallsberakning(galdenarId)
+    API->>GE: forbehallsberakning(galdenarId)
     GE->>E: somHushall(idag)
     E-->>GE: Hushall (inkomst, boende, sambo, barnens åldrar)
     GE->>FB: berakna(hushall, Normalbelopp.AR_2026)
     Note right of FB: 34 000 − (9 495 + 5 500)<br/>= 19 005 kr/mån
     FB-->>GE: Forbehallsberakning
-    GE-->>UC: utmätningsbart belopp = 19 005
+    GE-->>API: Forbehallsberakning
+    API-->>UC: utmätningsbart belopp = 19 005
     UC->>UTS: beslutaLoneutmatning(19 005, idag)
     UTS->>UTS: kontrolleraUtmatningsbart() + bytStatus(LONEUTMATNING)
     UC-->>H: 200 OK, status LONEUTMATNING

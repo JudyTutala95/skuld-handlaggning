@@ -14,19 +14,19 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
-import se.jtutala.handlaggning.arende.ArendeSvar;
-import se.jtutala.handlaggning.arende.Bestridande;
-import se.jtutala.handlaggning.arende.Dagboksanteckning;
-import se.jtutala.handlaggning.arende.Delgivning;
-import se.jtutala.handlaggning.arende.RegistreraArende;
-import se.jtutala.handlaggning.arende.RegistreraInbetalning;
-import se.jtutala.handlaggning.arende.Verkstallighet;
 import se.jtutala.handlaggning.arende.Arendestatus;
 import se.jtutala.handlaggning.arende.Arendetyp;
-import se.jtutala.handlaggning.galdenar.GaldenarSvar;
-import se.jtutala.handlaggning.galdenar.RegistreraGaldenar;
-import se.jtutala.handlaggning.galdenar.SokGaldenar;
-import se.jtutala.handlaggning.galdenar.UppdateraEkonomi;
+import se.jtutala.handlaggning.arende.dto.DagboksanteckningResponse;
+import se.jtutala.handlaggning.arende.dto.ArendeResponse;
+import se.jtutala.handlaggning.arende.dto.BestridandeRequest;
+import se.jtutala.handlaggning.arende.dto.DelgivningRequest;
+import se.jtutala.handlaggning.arende.dto.InbetalningRequest;
+import se.jtutala.handlaggning.arende.dto.RegistreraArendeRequest;
+import se.jtutala.handlaggning.arende.dto.VerkstallighetRequest;
+import se.jtutala.handlaggning.galdenar.dto.GaldenarResponse;
+import se.jtutala.handlaggning.galdenar.dto.RegistreraGaldenarRequest;
+import se.jtutala.handlaggning.galdenar.dto.SokGaldenarRequest;
+import se.jtutala.handlaggning.galdenar.dto.UppdateraEkonomiRequest;
 import se.jtutala.handlaggning.regelverk.Forbehallsberakning;
 import se.jtutala.handlaggning.regelverk.Maltyp;
 
@@ -57,11 +57,11 @@ class HandlaggningIntegrationTest {
     // ---------- Stegen i scenariot ----------
 
     private long registreraGaldenarMedLon25000() {
-        GaldenarSvar g = post("/api/galdenarer",
-                new RegistreraGaldenar("20010923-2397", "Dana", "Prov", "Provgatan 5, 555 55 Provstad"),
-                HttpStatus.CREATED, GaldenarSvar.class);
+        GaldenarResponse g = post("/api/galdenarer",
+                new RegistreraGaldenarRequest("20010923-2397", "Dana", "Prov", "Provgatan 5, 555 55 Provstad"),
+                HttpStatus.CREATED, GaldenarResponse.class);
         put("/api/galdenarer/" + g.id() + "/ekonomi",
-                new UppdateraEkonomi(new BigDecimal("25000"), new BigDecimal("8000"), false, List.of()));
+                new UppdateraEkonomiRequest(new BigDecimal("25000"), new BigDecimal("8000"), false, List.of()));
 
         Forbehallsberakning berakning = http.get().uri("/api/galdenarer/{id}/forbehallsbelopp", g.id())
                 .exchange().expectStatus().isOk()
@@ -71,39 +71,39 @@ class HandlaggningIntegrationTest {
     }
 
     private long ansokOmBetalningsforelaggande(long galdenarId) {
-        ArendeSvar bf = post("/api/arenden", new RegistreraArende(Arendetyp.BETALNINGSFORELAGGANDE, Maltyp.ENSKILT,
+        ArendeResponse bf = post("/api/arenden", new RegistreraArendeRequest(Arendetyp.BETALNINGSFORELAGGANDE, Maltyp.ENSKILT,
                 galdenarId, "Exempel Finans AB", new BigDecimal("20000.00"), LocalDate.of(2026, 1, 1), false, "lisa"),
-                HttpStatus.CREATED, ArendeSvar.class);
+                HttpStatus.CREATED, ArendeResponse.class);
         assertThat(bf.arendenummer()).matches("BF-\\d{4}-\\d{6}");
         assertThat(bf.status()).isEqualTo(Arendestatus.REGISTRERAT);
         return bf.id();
     }
 
     private void delgeOchAvvisaSentBestridande(long bf) {
-        ArendeSvar delgivet = post("/api/arenden/" + bf + "/delgivning", new Delgivning(LocalDate.of(2026, 1, 5)),
-                HttpStatus.OK, ArendeSvar.class);
+        ArendeResponse delgivet = post("/api/arenden/" + bf + "/delgivning", new DelgivningRequest(LocalDate.of(2026, 1, 5)),
+                HttpStatus.OK, ArendeResponse.class);
         assertThat(delgivet.bestridandefrist()).isEqualTo(LocalDate.of(2026, 1, 15));
 
         http.post().uri("/api/arenden/{id}/bestridande", bf).contentType(MediaType.APPLICATION_JSON)
-                .body(new Bestridande(LocalDate.of(2026, 1, 20), "Jag håller inte med"))
+                .body(new BestridandeRequest(LocalDate.of(2026, 1, 20), "Jag håller inte med"))
                 .exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT)
                 .expectBody().jsonPath("$.detail").isEqualTo("Bestridandet kom in 2026-01-20, efter fristen 2026-01-15");
     }
 
     private long meddelaUtslagOchVerkstall(long bf) {
-        ArendeSvar utslag = post("/api/arenden/" + bf + "/utslag", null, HttpStatus.OK, ArendeSvar.class);
+        ArendeResponse utslag = post("/api/arenden/" + bf + "/utslag", null, HttpStatus.OK, ArendeResponse.class);
         assertThat(utslag.status()).isEqualTo(Arendestatus.UTSLAG_MEDDELAT);
 
-        ArendeSvar uts = post("/api/arenden/" + bf + "/verkstallighet", new Verkstallighet("omar"),
-                HttpStatus.CREATED, ArendeSvar.class);
+        ArendeResponse uts = post("/api/arenden/" + bf + "/verkstallighet", new VerkstallighetRequest("omar"),
+                HttpStatus.CREATED, ArendeResponse.class);
         assertThat(uts.typ()).isEqualTo(Arendetyp.UTSOKNING);
         assertThat(uts.ursprungsarendeId()).isEqualTo(bf);
         return uts.id();
     }
 
     private void utredOchBeslutaLoneutmatning(long uts) {
-        post("/api/arenden/" + uts + "/utredning", null, HttpStatus.OK, ArendeSvar.class);
-        ArendeSvar utmatning = post("/api/arenden/" + uts + "/loneutmatning", null, HttpStatus.OK, ArendeSvar.class);
+        post("/api/arenden/" + uts + "/utredning", null, HttpStatus.OK, ArendeResponse.class);
+        ArendeResponse utmatning = post("/api/arenden/" + uts + "/loneutmatning", null, HttpStatus.OK, ArendeResponse.class);
 
         assertThat(utmatning.status()).isEqualTo(Arendestatus.LONEUTMATNING);
         assertThat(utmatning.loneutmatningPerManad()).isEqualByComparingTo("10757");
@@ -111,12 +111,12 @@ class HandlaggningIntegrationTest {
 
     private void betalaHelaSkulden(long uts) {
         betala(uts, "10757.00", LocalDate.of(2026, 2, 25));
-        ArendeSvar betalt = betala(uts, "9243.00", LocalDate.of(2026, 3, 25));
+        ArendeResponse betalt = betala(uts, "9243.00", LocalDate.of(2026, 3, 25));
 
         assertThat(betalt.status()).isEqualTo(Arendestatus.BETALT);
         assertThat(betalt.kvarstaendeSkuld()).isEqualByComparingTo("0");
         assertThat(betalt.mojligaNastaStatusar()).isEmpty();
-        assertThat(betalt.dagbok()).extracting(Dagboksanteckning::handelse)
+        assertThat(betalt.dagbok()).extracting(DagboksanteckningResponse::handelse)
                 .anyMatch(h -> h.startsWith("Beslut om löneutmätning"))
                 .last().isEqualTo("Skulden är fullt betald.");
     }
@@ -126,16 +126,16 @@ class HandlaggningIntegrationTest {
                 .expectBody().jsonPath("$.length()").isEqualTo(2);
     }
 
-    private ArendeSvar betala(long uts, String belopp, LocalDate datum) {
+    private ArendeResponse betala(long uts, String belopp, LocalDate datum) {
         return post("/api/arenden/" + uts + "/inbetalningar",
-                new RegistreraInbetalning(new BigDecimal(belopp), datum), HttpStatus.OK, ArendeSvar.class);
+                new InbetalningRequest(new BigDecimal(belopp), datum), HttpStatus.OK, ArendeResponse.class);
     }
 
     // ---------- Övriga tester ----------
 
     @Test
     void exempeldataFinnsOchSokningSkerMedPostSaPersonnummerInteHamnarIUrl() {
-        GaldenarSvar anna = post("/api/galdenarer/sok", new SokGaldenar("19850315-2384"), HttpStatus.OK, GaldenarSvar.class);
+        GaldenarResponse anna = post("/api/galdenarer/sok", new SokGaldenarRequest("19850315-2384"), HttpStatus.OK, GaldenarResponse.class);
 
         assertThat(anna.namn()).isEqualTo("Anna Exempelsson");
         http.get().uri("/api/arenden?status=REGISTRERAT").exchange().expectStatus().isOk()
@@ -145,14 +145,14 @@ class HandlaggningIntegrationTest {
     @Test
     void dubblettPersonnummerGer409() {
         http.post().uri("/api/galdenarer").contentType(MediaType.APPLICATION_JSON)
-                .body(new RegistreraGaldenar("19780211-2388", "Kopia", "Av Cecilia", "Någonstans 1"))
+                .body(new RegistreraGaldenarRequest("19780211-2388", "Kopia", "Av Cecilia", "Någonstans 1"))
                 .exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT);
     }
 
     @Test
     void ogiltigtPersonnummerGer400() {
         http.post().uri("/api/galdenarer").contentType(MediaType.APPLICATION_JSON)
-                .body(new RegistreraGaldenar("19850315-0000", "Fel", "Nummer", "Gatan 1"))
+                .body(new RegistreraGaldenarRequest("19850315-0000", "Fel", "Nummer", "Gatan 1"))
                 .exchange().expectStatus().isBadRequest()
                 .expectBody().jsonPath("$.detail").isEqualTo("personnumrets kontrollsiffra stämmer inte");
     }

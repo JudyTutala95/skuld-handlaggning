@@ -130,21 +130,66 @@ flowchart TB
 
 **Regler som Spring Modulith kontrollerar** (`ModulStrukturTest`):
 
-- En modul får bara använda andra modulers **publika** typer. `Galdenar` (entiteten) och
-  `GaldenarRepository` är *package-private* – ärendemodulen måste gå via `GaldenarUppslag` och `GaldenarEkonomi`.
+- En modul får bara använda det som ligger **direkt i en annan moduls paket** – dess publika API.
+  Allt i underpaketen (`web`, `service`, `domain` …) är internt. Ärendemodulen pratar därför med
+  gäldenärsmodulen via interfacet `GaldenarApi`, aldrig via dess services eller entiteter.
 - Inga cykliska beroenden. `arende` känner inte till `notifiering` – den publicerar bara en händelse.
 
 Testet genererar också diagram till `target/spring-modulith-docs/`.
 
-### Lagren inuti en modul
+### Lagren inuti en modul: controller → service → repository
+
+Varje modul (`arende`, `galdenar`) är uppdelad i samma fem lager. Det publika API:t ligger direkt
+i modulens paket.
+
+```
+arende/
+├── ArendeStatusAndrad, Arendestatus, Arendetyp   ← publikt API (händelsen som andra moduler lyssnar på)
+├── web/          *Controller   – HTTP in och ut, @Valid, inget annat
+├── dto/          *Request, *Response – records som beskriver API:t
+├── service/      *Service      – ett användningsfall per klass, @Transactional, mappning DTO ⇄ domän
+├── domain/       entiteter och värdeobjekt – affärsreglerna, inget Spring Web
+└── repository/   *Repository   – Spring Data JPA
+
+galdenar/
+├── GaldenarApi                                   ← publikt API (används av arende)
+├── web/  dto/  service/  domain/  repository/
+```
 
 ```mermaid
 flowchart LR
-    HTTP(["HTTP"]) --> CTRL["Controller<br/>DTO + @Valid"]
-    CTRL --> UC["Användningsfall<br/>hämta → utför → spara"]
-    UC --> DOM["Domänobjekt<br/>affärsreglerna"]
-    UC --> LAGER["Arendelager"] --> REPO["Repository"] --> DB[("DB")]
-    UC --> MAP["Mapper"] --> SVAR(["JSON-svar"])
+    HTTP(["HTTP<br/>JSON"]) --> WEB["web<br/>Controller"]
+    WEB -->|Request-DTO| SERVICE["service<br/>Service"]
+    SERVICE -->|Response-DTO| WEB
+    SERVICE --> REPO["repository<br/>Repository"]
+    REPO --> DB[("Databas")]
+    SERVICE --> DOMAIN["domain<br/>entiteter + regler"]
+    REPO --> DOMAIN
+    WEB -.-> DTO["dto"]
+    SERVICE -.-> DTO
+```
+
+| Lager | Får använda | Får **inte** använda | Namn |
+|---|---|---|---|
+| `web` | `service`, `dto` | `repository`, `domain` | `*Controller` |
+| `service` | `repository`, `domain`, `dto`, andra modulers API | `web` | `*Service` |
+| `repository` | `domain` | `service`, `web`, `dto` | `*Repository` (interface) |
+| `domain` | bara sig själv, `regelverk`, `common` | allt ovan | fritt, efter domänbegreppen |
+| `dto` | inget av lagren | `domain`, `service`, `web` | `*Request`, `*Response` (records) |
+
+Viktiga följder:
+
+- **Entiteter lämnar aldrig service-lagret.** Controllers ser bara DTO:er.
+- **Mappningen DTO ⇄ domän sker på ett ställe**, i service-lagret (`ArendeMapper`, `GaldenarMapper`).
+  Varken DTO:erna eller domänen känner till varandra.
+- **Transaktionen börjar och slutar i servicen** (`@Transactional`). Där hämtas, ändras och sparas data.
+
+Reglerna kontrolleras av **ArchUnit** i [`LagerArkitekturTest`](src/test/java/se/jtutala/handlaggning/LagerArkitekturTest.java).
+Skriver någon en controller som anropar ett repository direkt misslyckas bygget:
+
+```
+Constructor <...web.FelaktigController.<init>(...repository.ArendeRepository)>
+has parameter of type <...repository.ArendeRepository>
 ```
 
 ### Clean code: ett ansvar per klass och metod
@@ -165,20 +210,20 @@ metod ska göra **en sak** – och heta det den gör. Så här är ansvaret för
 | Dagbokens anteckningar | `Dagbok` |
 | Inbetalningarna och deras summa | `Inbetalningar` |
 | Skapa rätt sorts ärende | `ArendeFabrik` |
-| Hämta och spara ärenden, kontrollera typ | `Arendelager` |
-| Ärende → API-svar | `ArendeSvarMapper` |
-| Användningsfallet *registrera* | `ArendeRegistrering` |
-| Användningsfallet *läsa/arbetslista* | `ArendeUppslag` |
-| Utredning och avskrivning (alla typer) | `GemensammaAtgarder` |
-| Användningsfall per process | `BetalningsforelaggandeHandlaggning`, `UtsokningHandlaggning`, `SkuldsaneringHandlaggning` |
+| Hämta och spara ärenden, kontrollera typ | `ArendeHamtare` |
+| DTO ⇄ domän | `ArendeMapper` |
+| Användningsfallet *registrera* | `ArendeRegistreringService` |
+| Användningsfallet *läsa/arbetslista* | `ArendeSokService` |
+| Utredning och avskrivning (alla typer) | `ArendeAtgardService` |
+| Användningsfall per process | `BetalningsforelaggandeService`, `UtsokningService`, `SkuldsaneringService` |
 | HTTP per process | `ArendeController`, `BetalningsforelaggandeController`, `UtsokningController`, `SkuldsaneringController` |
-| Ett kommando eller svar över HTTP | en record per fil: `Delgivning`, `Bestridande`, `ArendeSvar` … |
+| Ett kommando eller svar över HTTP | en record per fil: `DelgivningRequest`, `BestridandeRequest`, `ArendeResponse` … |
 
 Samma princip i övriga moduler:
 
 | Modul | Uppdelning |
 |---|---|
-| `galdenar` | `GaldenarRegistrering` (skapa), `GaldenarUppslag` (läsa), `GaldenarEkonomi` (ekonomi och förbehållsbelopp), `Ekonomi` (hushållets uppgifter), `Luhn` (kontrollsiffran), `Personnummer` (värdeobjektet), `GaldenarMapper` |
+| `galdenar` | `GaldenarRegistreringService` (skapa), `GaldenarSokService` (läsa), `GaldenarEkonomiService` (ekonomi och förbehållsbelopp), `Ekonomi` (hushållets uppgifter), `Luhn` (kontrollsiffran), `Personnummer` (värdeobjektet), `GaldenarMapper` |
 | `notifiering` | `BrevUtskick` (reagera på händelser), `Brevmall` (texten), `Brevlada`/`LoggandeBrevlada` (leveransen) |
 | `common` | `Kalender` (dagens datum), `GlobalFelhanterare` (undantag → HTTP), `Problemsvar` (svarsformatet) |
 
@@ -194,16 +239,17 @@ public void bestrid(LocalDate inkomDatum, String grund, LocalDate idag) {
 och varje användningsfall följer samma tre steg:
 
 ```java
-public ArendeSvar delge(long id, LocalDate datum) {
-    Betalningsforelaggande bf = hamta(id);   // 1. hämta
-    bf.delge(datum, kalender.idag());        // 2. låt domänobjektet göra jobbet
-    return spara(bf);                        // 3. spara och svara
+@Transactional
+public ArendeResponse delge(long id, DelgivningRequest request) {
+    Betalningsforelaggande bf = hamta(id);           // 1. hämta via repository
+    bf.delge(request.datum(), kalender.idag());      // 2. låt domänobjektet göra jobbet
+    return spara(bf);                                // 3. spara och svara med en DTO
 }
 ```
 
 **Polymorfism i stället för typkontroller:** tidigare började många metoder med
 "är det här ett betalningsföreläggande?". Nu finns `delge` bara på `Betalningsforelaggande`,
-så frågan behövs inte. Att rätt typ hämtas kontrolleras på ett ställe: `Arendelager.hamta(id, typ)`.
+så frågan behövs inte. Att rätt typ hämtas kontrolleras på ett ställe: `ArendeHamtare.hamta(id, typ)`.
 
 ### Designval och varför
 
@@ -218,7 +264,8 @@ så frågan behövs inte. Att rätt typ hämtas kontrolleras på ett ställe: `A
 | **Referens med id mellan moduler** | `Arende` har `galdenarId`, inte ett `Galdenar`-objekt. Ingen foreign key mellan modulernas tabeller. | `V1__schema.sql` |
 | **Injicerad `Clock`** | Frister och preskription beror på "idag". Testerna styr datumet. | `KlockKonfiguration` |
 | **Problem Details (RFC 9457)** | Standardiserade felsvar med begripliga meddelanden. | `GlobalFelhanterare` |
-| **DTO:er som records** | API-kontraktet skilt från databasen. | `*Dtos.java` |
+| **DTO:er som records** | API-kontraktet skilt från databasen. | `dto/` |
+| **Lager per modul** | controller → service → repository, kontrollerat av ArchUnit. | `LagerArkitekturTest` |
 | **Flyway** | Versionshanterat databasschema. | `db/migration` |
 | **Optimistisk låsning** | `@Version` – två handläggare kan inte skriva över varandra. | entiteterna |
 | **Asynkrona händelselyssnare** | Brev skickas efter commit, utan att handläggaren väntar. | `@ApplicationModuleListener` |
@@ -373,6 +420,7 @@ Svar för ett ärende (förkortat):
 ```
 HandlaggningIntegrationTest   hela kedjan via HTTP: BF → utslag → verkställighet → löneutmätning → betalt
 ModulStrukturTest             arkitekturen: modulgränser och inga cykler (Spring Modulith)
+LagerArkitekturTest           arkitekturen: lagren inuti modulerna och namnregler (ArchUnit)
 ArendeControllerTest          @WebMvcTest: validering, 400/404/409 som Problem Details
 BetalningsforelaggandeTest    reglerna för betalningsföreläggande – utan Spring
 UtsokningsarendeTest          reglerna för utsökning
