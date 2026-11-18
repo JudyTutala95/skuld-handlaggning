@@ -5,6 +5,7 @@ import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.then;
 
 import java.time.LocalDate;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,15 +18,21 @@ import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import se.jtutala.handlaggning.common.HittadesInteException;
 import se.jtutala.handlaggning.common.RegelbrottException;
 
-/// Webbslice-test: HTTP-anrop, JSON, validering och felhantering – servicen är mockad.
-@WebMvcTest(ArendeController.class)
+/// Webbslice-test: HTTP, JSON, validering och felsvar. Användningsfallen är mockade.
+@WebMvcTest({ArendeController.class, BetalningsforelaggandeController.class})
 class ArendeControllerTest {
 
     @Autowired
     MockMvcTester mvc;
 
     @MockitoBean
-    ArendeService service;
+    ArendeRegistrering registrering;
+    @MockitoBean
+    ArendeUppslag uppslag;
+    @MockitoBean
+    GemensammaAtgarder atgarder;
+    @MockitoBean
+    BetalningsforelaggandeHandlaggning betalningsforelaggande;
 
     @Test
     void registreringMedSaknadeFaltGer400MedFaltlista() {
@@ -39,7 +46,7 @@ class ArendeControllerTest {
         assertThat(svar).hasStatus(HttpStatus.BAD_REQUEST).hasContentType(MediaType.APPLICATION_PROBLEM_JSON);
         assertThat(svar).bodyJson().extractingPath("$.fel").asMap()
                 .containsKeys("maltyp", "galdenarId", "borgenar", "kapitalbelopp", "forfallodag", "handlaggare");
-        then(service).shouldHaveNoInteractions();
+        then(registrering).shouldHaveNoInteractions();
     }
 
     @Test
@@ -51,7 +58,7 @@ class ArendeControllerTest {
 
     @Test
     void regelbrottGer409MedBegripligtMeddelande() {
-        given(service.bestrid(1L, LocalDate.of(2026, 3, 13), "för sent"))
+        given(betalningsforelaggande.bestrid(1L, LocalDate.of(2026, 3, 13), "för sent"))
                 .willThrow(new RegelbrottException("Bestridandet kom in 2026-03-13, efter fristen 2026-03-12"));
 
         var svar = mvc.post().uri("/api/arenden/1/bestridande")
@@ -68,7 +75,7 @@ class ArendeControllerTest {
 
     @Test
     void okantArendeGer404() {
-        given(service.hamta(99L)).willThrow(new HittadesInteException("Ärende", 99L));
+        given(uppslag.hamta(99L)).willThrow(new HittadesInteException("Ärende", 99L));
 
         assertThat(mvc.get().uri("/api/arenden/99"))
                 .hasStatus(HttpStatus.NOT_FOUND)
@@ -76,17 +83,17 @@ class ArendeControllerTest {
     }
 
     @Test
-    void sokningUtanFilterArTillaten() {
-        given(service.sok(null, null)).willReturn(java.util.List.of());
+    void arbetslistaUtanFilter() {
+        given(uppslag.arbetslista(null, null)).willReturn(List.of());
 
         assertThat(mvc.get().uri("/api/arenden")).hasStatusOk().bodyJson().isLenientlyEqualTo("[]");
     }
 
     @Test
-    void sokningMedStatus() {
-        given(service.sok(null, Arendestatus.DELGIVET)).willReturn(java.util.List.of());
+    void arbetslistaMedStatus() {
+        given(uppslag.arbetslista(null, Arendestatus.DELGIVET)).willReturn(List.of());
 
         assertThat(mvc.get().uri("/api/arenden?status=DELGIVET")).hasStatusOk();
-        then(service).should().sok(null, Arendestatus.DELGIVET);
+        then(uppslag).should().arbetslista(null, Arendestatus.DELGIVET);
     }
 }

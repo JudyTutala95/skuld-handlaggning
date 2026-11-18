@@ -4,21 +4,19 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 
 /// Beräknar **förbehållsbeloppet** vid löneutmätning: den del av lönen som gäldenären
-/// alltid får behålla för att kunna leva. Resten av nettolönen kan utmätas
-/// (dras från lönen och betalas till borgenärerna).
+/// alltid får behålla för att kunna leva. Resten av nettolönen kan utmätas.
 ///
 /// ```
-/// förbehållsbelopp      = normalbelopp (vuxna + barn) + boendekostnad
-/// utmätningsbart belopp = nettolön − förbehållsbelopp   (aldrig under 0)
+/// förbehållsbelopp      = gäldenärens andel av (normalbelopp + boendekostnad)
+/// utmätningsbart belopp = nettolön − förbehållsbelopp   (aldrig under 0, hela kronor)
 /// ```
 ///
 /// Rättslig grund: 7 kap. 5 § utsökningsbalken + Kronofogdens föreskrifter (normalbelopp).
 ///
-/// **Förenkling i detta system:** för sammanlevande delas hushållets gemensamma kostnader
-/// (normalbelopp för vuxna och barn samt boendet) lika mellan de två vuxna. I verkligheten
-/// fördelas de normalt efter inkomst och fler kostnader kan läggas till (t.ex. resor till arbetet).
+/// **Förenkling:** för sammanlevande delas hushållets kostnader lika mellan de två vuxna.
+/// I verkligheten fördelas de normalt efter inkomst.
 ///
-/// Klassen är **ren Java** – inget Spring, ingen databas. Den är lätt att testa och att läsa.
+/// Varje steg i uträkningen är en egen liten metod – läs `berakna` uppifrån och ned.
 public final class Forbehallsbelopp {
 
     private static final BigDecimal TVA = BigDecimal.valueOf(2);
@@ -27,28 +25,36 @@ public final class Forbehallsbelopp {
     }
 
     public static Forbehallsberakning berakna(Hushall hushall, Normalbelopp normalbelopp) {
-        BigDecimal vuxna = hushall.sammanlevande() ? normalbelopp.sammanlevande() : normalbelopp.ensamstaende();
-        BigDecimal barn = hushall.barnensAldrar().stream()
-                .map(normalbelopp::forBarn)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal normal = galdenarensAndel(hushall, hushalletsNormalbelopp(hushall, normalbelopp));
+        BigDecimal boende = galdenarensAndel(hushall, hushall.boendekostnadPerManad());
+        BigDecimal forbehall = normal.add(boende);
 
-        BigDecimal hushalletsNormalbelopp = vuxna.add(barn);
-        BigDecimal hushalletsBoende = hushall.boendekostnadPerManad();
-
-        // Gäldenärens andel av hushållets kostnader
-        BigDecimal andelNormalbelopp = hushall.sammanlevande() ? halva(hushalletsNormalbelopp) : hushalletsNormalbelopp;
-        BigDecimal andelBoende = hushall.sammanlevande() ? halva(hushalletsBoende) : hushalletsBoende;
-
-        BigDecimal forbehall = andelNormalbelopp.add(andelBoende);
-        BigDecimal utmatningsbart = hushall.nettoinkomstPerManad().subtract(forbehall)
-                .max(BigDecimal.ZERO)
-                .setScale(0, RoundingMode.DOWN); // hela kronor, avrundat till gäldenärens fördel
-
-        return new Forbehallsberakning(normalbelopp.ar(), andelNormalbelopp, andelBoende, forbehall,
-                hushall.nettoinkomstPerManad(), utmatningsbart);
+        return new Forbehallsberakning(normalbelopp.ar(), normal, boende, forbehall,
+                hushall.nettoinkomstPerManad(), utmatningsbart(hushall.nettoinkomstPerManad(), forbehall));
     }
 
-    private static BigDecimal halva(BigDecimal belopp) {
-        return belopp.divide(TVA, 2, RoundingMode.HALF_UP);
+    /// Vuxnas normalbelopp plus ett normalbelopp per barn.
+    static BigDecimal hushalletsNormalbelopp(Hushall hushall, Normalbelopp normalbelopp) {
+        return vuxnasNormalbelopp(hushall, normalbelopp).add(barnensNormalbelopp(hushall, normalbelopp));
+    }
+
+    private static BigDecimal vuxnasNormalbelopp(Hushall hushall, Normalbelopp normalbelopp) {
+        return hushall.sammanlevande() ? normalbelopp.sammanlevande() : normalbelopp.ensamstaende();
+    }
+
+    private static BigDecimal barnensNormalbelopp(Hushall hushall, Normalbelopp normalbelopp) {
+        return hushall.barnensAldrar().stream()
+                .map(normalbelopp::forBarn)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    /// Sammanlevande delar på kostnaden, ensamstående bär hela.
+    private static BigDecimal galdenarensAndel(Hushall hushall, BigDecimal hushalletsKostnad) {
+        return hushall.sammanlevande() ? hushalletsKostnad.divide(TVA, 2, RoundingMode.HALF_UP) : hushalletsKostnad;
+    }
+
+    /// Avrundas nedåt till hela kronor – till gäldenärens fördel.
+    private static BigDecimal utmatningsbart(BigDecimal nettoinkomst, BigDecimal forbehall) {
+        return nettoinkomst.subtract(forbehall).max(BigDecimal.ZERO).setScale(0, RoundingMode.DOWN);
     }
 }

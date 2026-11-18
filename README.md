@@ -127,7 +127,7 @@ se.jtutala.handlaggning
 **Regler som Spring Modulith kontrollerar** (`ModulStrukturTest`):
 
 - En modul får bara använda andra modulers **publika** typer. `Galdenar` (entiteten) och
-  `GaldenarRepository` är *package-private* – ärendemodulen måste gå via `GaldenarService`.
+  `GaldenarRepository` är *package-private* – ärendemodulen måste gå via `GaldenarUppslag` och `GaldenarEkonomi`.
 - Inga cykliska beroenden. `arende` känner inte till `notifiering` – den publicerar bara en händelse.
 
 Testet genererar också diagram till `target/spring-modulith-docs/`.
@@ -140,12 +140,71 @@ HTTP ──▶ Controller ──▶ Service (användningsfall) ──▶ Domäno
          validerar       returnerar DTO
 ```
 
+### Clean code: ett ansvar per klass och metod
+
+Varje klass ska bara ha **en anledning att ändras** (Single Responsibility Principle), och varje
+metod ska göra **en sak** – och heta det den gör. Så här är ansvaret fördelat i ärendemodulen:
+
+| Ansvar | Klass |
+|---|---|
+| Det gemensamma för alla ärenden: status, dagbok, händelser | `Arende` |
+| Reglerna för betalningsföreläggande | `Betalningsforelaggande` |
+| Reglerna för utsökning | `Utsokningsarende` |
+| Reglerna för skuldsanering | `Skuldsaneringsarende` |
+| Vilka statusbyten som är tillåtna | `Statusflode` |
+| Kravet: borgenär, belopp, förfallodag | `Fordran` |
+| 10-dagarsfristen för bestridande | `Bestridandefrist` |
+| De 5 åren för skuldsanering | `Skuldsaneringsperiod` |
+| Dagbokens anteckningar | `Dagbok` |
+| Inbetalningarna och deras summa | `Inbetalningar` |
+| Skapa rätt sorts ärende | `ArendeFabrik` |
+| Hämta och spara ärenden, kontrollera typ | `Arendelager` |
+| Ärende → API-svar | `ArendeSvarMapper` |
+| Användningsfallet *registrera* | `ArendeRegistrering` |
+| Användningsfallet *läsa/arbetslista* | `ArendeUppslag` |
+| Utredning och avskrivning (alla typer) | `GemensammaAtgarder` |
+| Användningsfall per process | `BetalningsforelaggandeHandlaggning`, `UtsokningHandlaggning`, `SkuldsaneringHandlaggning` |
+| HTTP per process | `ArendeController`, `BetalningsforelaggandeController`, `UtsokningController`, `SkuldsaneringController` |
+| Ett kommando eller svar över HTTP | en record per fil: `Delgivning`, `Bestridande`, `ArendeSvar` … |
+
+Samma princip i övriga moduler:
+
+| Modul | Uppdelning |
+|---|---|
+| `galdenar` | `GaldenarRegistrering` (skapa), `GaldenarUppslag` (läsa), `GaldenarEkonomi` (ekonomi och förbehållsbelopp), `Ekonomi` (hushållets uppgifter), `Luhn` (kontrollsiffran), `Personnummer` (värdeobjektet), `GaldenarMapper` |
+| `notifiering` | `BrevUtskick` (reagera på händelser), `Brevmall` (texten), `Brevlada`/`LoggandeBrevlada` (leveransen) |
+| `common` | `Kalender` (dagens datum), `GlobalFelhanterare` (undantag → HTTP), `Problemsvar` (svarsformatet) |
+
+**Metoder:** regler bryts ut till små metoder med namn som förklarar dem, t.ex.
+
+```java
+public void bestrid(LocalDate inkomDatum, String grund, LocalDate idag) {
+    kontrolleraIntime(inkomDatum);
+    bytStatus(BESTRITT, idag, "Bestridande inkom %s. Grund: %s".formatted(inkomDatum, grund));
+}
+```
+
+och varje användningsfall följer samma tre steg:
+
+```java
+public ArendeSvar delge(long id, LocalDate datum) {
+    Betalningsforelaggande bf = hamta(id);   // 1. hämta
+    bf.delge(datum, kalender.idag());        // 2. låt domänobjektet göra jobbet
+    return spara(bf);                        // 3. spara och svara
+}
+```
+
+**Polymorfism i stället för typkontroller:** tidigare började många metoder med
+"är det här ett betalningsföreläggande?". Nu finns `delge` bara på `Betalningsforelaggande`,
+så frågan behövs inte. Att rätt typ hämtas kontrolleras på ett ställe: `Arendelager.hamta(id, typ)`.
+
 ### Designval och varför
 
 | Val | Varför | Var |
 |---|---|---|
-| **Rik domänmodell** | Affärsreglerna ligger i `Arende`, inte utspridda i services. Testbara utan Spring. | `Arende.java` |
-| **Tillståndsmaskin på ett ställe** | Vilka statusbyten som är tillåtna står i en tabell per ärendetyp. | `Arendetyp.java` |
+| **Rik domänmodell** | Affärsreglerna ligger i ärendeklasserna, inte utspridda i services. Testbara utan Spring. | `Betalningsforelaggande.java` m.fl. |
+| **En klass per ärendetyp** | Varje process har sina egna regler i en egen klass; JPA lagrar dem i samma tabell (`SINGLE_TABLE`). | `Arende` + subklasser |
+| **Tillståndsmaskin per typ** | Vilka statusbyten som är tillåtna står i ett `Statusflode` i respektive ärendeklass. | `Statusflode.java` |
 | **Task-based API** | En endpoint per åtgärd (`/bestridande`, `/utslag`) i stället för "sätt status". Servern äger reglerna. | `ArendeController` |
 | **Värdeobjekt** | `Personnummer` kan inte finnas i ogiltigt skick (Luhn, datum). | `Personnummer.java` |
 | **Domänhändelser** | `ArendeStatusAndrad` publiceras automatiskt när ärendet sparas (`AbstractAggregateRoot`). | `Arende`, `BrevUtskick` |
@@ -170,7 +229,10 @@ Personnummer är känsliga personuppgifter:
 
 ## Ärendets livscykel
 
-Statusflödena definieras i [`Arendetyp.java`](src/main/java/se/jtutala/handlaggning/arende/Arendetyp.java).
+Statusflödena definieras som konstanten `FLODE` i respektive ärendeklass:
+[`Betalningsforelaggande`](src/main/java/se/jtutala/handlaggning/arende/Betalningsforelaggande.java),
+[`Utsokningsarende`](src/main/java/se/jtutala/handlaggning/arende/Utsokningsarende.java) och
+[`Skuldsaneringsarende`](src/main/java/se/jtutala/handlaggning/arende/Skuldsaneringsarende.java).
 
 **Betalningsföreläggande**
 ```
@@ -191,7 +253,7 @@ REGISTRERAT ─▶ UTREDNING ─┬─▶ SKULDSANERING_PAGAR ──(5 år)─�
                           └─▶ SKULDSANERING_AVSLAG
 ```
 
-Exempel på regler som kontrolleras i `Arende`:
+Exempel på regler som kontrolleras i ärendeklasserna:
 
 | Regel | Fel om den bryts |
 |---|---|
@@ -305,15 +367,20 @@ Svar för ett ärende (förkortat):
 HandlaggningIntegrationTest   hela kedjan via HTTP: BF → utslag → verkställighet → löneutmätning → betalt
 ModulStrukturTest             arkitekturen: modulgränser och inga cykler (Spring Modulith)
 ArendeControllerTest          @WebMvcTest: validering, 400/404/409 som Problem Details
-ArendeTest                    affärsreglerna i Arende – utan Spring
+BetalningsforelaggandeTest    reglerna för betalningsföreläggande – utan Spring
+UtsokningsarendeTest          reglerna för utsökning
+SkuldsaneringsarendeTest      reglerna för skuldsanering
+StatusflodeTest               tillståndsmaskinen
 ForbehallsbeloppTest          uträkningar med papper-och-penna-exempel
 PreskriptionTest              preskriptionsregler
-PersonnummerTest              Luhn, datum, samordningsnummer, maskering
+PersonnummerTest, LuhnTest    datum, samordningsnummer, maskering, kontrollsiffra
+EkonomiTest                   hushållets uppgifter och barnens ålder
 BrevmallTest                  vilka statusbyten som ger brev
 ```
 
+Testklasserna följer produktionsklasserna: en testklass per klass med regler.
 De flesta testerna är rena enhetstester som körs på millisekunder. Det är möjligt för att
-affärslogiken ligger i vanliga Java-klasser (`regelverk`, `Arende`) och inte i Spring-beans.
+affärslogiken ligger i vanliga Java-klasser och inte i Spring-beans.
 
 ---
 

@@ -1,6 +1,5 @@
 package se.jtutala.handlaggning.common;
 
-import java.net.URI;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -12,6 +11,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.validation.BindingResult;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -19,54 +19,51 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
-/// Översätter fel till **Problem Details (RFC 9457)** – ett standardformat för fel i HTTP-API:er.
+/// Ansvar: **översätta undantag till HTTP-felsvar**. En metod per feltyp.
 ///
-/// ```json
-/// { "type": "urn:problem:regelbrott", "title": "Åtgärden är inte tillåten", "status": 409,
-///   "detail": "Bestridandet kom in 2026-02-20, efter fristen 2026-02-15" }
-/// ```
+/// Själva svarsformatet skapas av `Problemsvar`.
 @RestControllerAdvice
 public class GlobalFelhanterare extends ResponseEntityExceptionHandler {
 
-    @ExceptionHandler(HandlaggningException.class)
-    ProblemDetail hantera(HandlaggningException ex) {
-        // Uttömmande switch över en sealed klass – ingen default behövs.
-        return switch (ex) {
-            case HittadesInteException e -> problem(HttpStatus.NOT_FOUND, "Hittades inte", e.getMessage(), "hittades-inte");
-            case RegelbrottException e -> problem(HttpStatus.CONFLICT, "Åtgärden är inte tillåten", e.getMessage(), "regelbrott");
-        };
+    @ExceptionHandler(HittadesInteException.class)
+    ProblemDetail hittadesInte(HittadesInteException ex) {
+        return Problemsvar.skapa(HttpStatus.NOT_FOUND, "Hittades inte", ex.getMessage(), "hittades-inte");
+    }
+
+    @ExceptionHandler(RegelbrottException.class)
+    ProblemDetail regelbrott(RegelbrottException ex) {
+        return Problemsvar.skapa(HttpStatus.CONFLICT, "Åtgärden är inte tillåten", ex.getMessage(), "regelbrott");
     }
 
     @ExceptionHandler(OptimisticLockingFailureException.class)
     ProblemDetail samtidigAndring(OptimisticLockingFailureException ex) {
-        return problem(HttpStatus.CONFLICT, "Samtidig ändring",
+        return Problemsvar.skapa(HttpStatus.CONFLICT, "Samtidig ändring",
                 "Ärendet ändrades av någon annan samtidigt. Ladda om och försök igen.", "samtidig-andring");
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
     ProblemDetail ogiltigtVarde(IllegalArgumentException ex) {
-        return problem(HttpStatus.BAD_REQUEST, "Ogiltigt värde", ex.getMessage(), "ogiltigt-varde");
+        String detalj = Objects.requireNonNullElse(ex.getMessage(), "Ogiltigt värde");
+        return Problemsvar.skapa(HttpStatus.BAD_REQUEST, "Ogiltigt värde", detalj, "ogiltigt-varde");
     }
 
     @Override
     protected @Nullable ResponseEntity<Object> handleMethodArgumentNotValid(
             MethodArgumentNotValidException ex, HttpHeaders headers, HttpStatusCode status, WebRequest request) {
-        Map<String, String> fel = new LinkedHashMap<>();
-        for (FieldError f : ex.getBindingResult().getFieldErrors()) {
-            fel.putIfAbsent(f.getField(), Objects.requireNonNullElse(f.getDefaultMessage(), "ogiltigt värde"));
-        }
         ProblemDetail body = ex.getBody();
         body.setTitle("Valideringsfel");
         body.setDetail("Ett eller flera fält är ogiltiga.");
-        body.setType(URI.create("urn:problem:validering"));
-        body.setProperty("fel", fel);
+        body.setType(Problemsvar.typUri("validering"));
+        body.setProperty("fel", faltfel(ex.getBindingResult()));
         return handleExceptionInternal(ex, body, headers, status, request);
     }
 
-    private static ProblemDetail problem(HttpStatus status, String titel, @Nullable String detalj, String typ) {
-        ProblemDetail p = ProblemDetail.forStatusAndDetail(status, Objects.requireNonNullElse(detalj, titel));
-        p.setTitle(titel);
-        p.setType(URI.create("urn:problem:" + typ));
-        return p;
+    /// Fältnamn → första felmeddelandet för fältet.
+    private static Map<String, String> faltfel(BindingResult resultat) {
+        Map<String, String> fel = new LinkedHashMap<>();
+        for (FieldError f : resultat.getFieldErrors()) {
+            fel.putIfAbsent(f.getField(), Objects.requireNonNullElse(f.getDefaultMessage(), "ogiltigt värde"));
+        }
+        return fel;
     }
 }

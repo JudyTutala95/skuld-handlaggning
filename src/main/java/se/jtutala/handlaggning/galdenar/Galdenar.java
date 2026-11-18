@@ -1,29 +1,20 @@
 package se.jtutala.handlaggning.galdenar;
 
-import java.math.BigDecimal;
-import java.time.LocalDate;
-import java.util.ArrayList;
-import java.util.List;
-
-import jakarta.persistence.CollectionTable;
 import jakarta.persistence.Column;
-import jakarta.persistence.ElementCollection;
+import jakarta.persistence.Embedded;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.JoinColumn;
-import jakarta.persistence.OrderColumn;
 import jakarta.persistence.Version;
 
 import org.jspecify.annotations.Nullable;
 
-import se.jtutala.handlaggning.regelverk.Hushall;
-
 /// En **gäldenär** – personen som har skulden.
 ///
-/// Klassen är package-private: andra moduler får inte röra entiteten direkt,
-/// bara gå via `GaldenarService` (modulens publika API).
+/// Ansvar: gäldenärens identitet och personuppgifter. Ekonomin är en egen klass (`Ekonomi`).
+///
+/// Package-private: andra moduler går via `GaldenarUppslag` och `GaldenarEkonomi`.
 @Entity
 class Galdenar {
 
@@ -43,24 +34,13 @@ class Galdenar {
     @Column(nullable = false)
     private String adress;
 
-    // --- Ekonomi (används vid löneutmätning) ---
-    @Column(nullable = false)
-    private BigDecimal nettoinkomstPerManad = BigDecimal.ZERO;
-
-    @Column(nullable = false)
-    private BigDecimal boendekostnadPerManad = BigDecimal.ZERO;
-
-    private boolean sammanlevande;
-
-    @ElementCollection
-    @CollectionTable(name = "galdenar_barn", joinColumns = @JoinColumn(name = "galdenar_id"))
-    @OrderColumn(name = "rad")
-    @Column(name = "fodelsear")
-    private List<Integer> barnensFodelsear = new ArrayList<>();
+    @Embedded
+    private Ekonomi ekonomi = Ekonomi.okand();
 
     @Version
     private long version;
 
+    /// Endast för JPA.
     protected Galdenar() {
         this.personnummer = new Personnummer("191212121212");
         this.fornamn = "";
@@ -75,27 +55,16 @@ class Galdenar {
         this.adress = adress;
     }
 
-    void uppdateraEkonomi(BigDecimal nettoinkomst, BigDecimal boendekostnad, boolean sammanlevande, List<Integer> barnensFodelsear) {
-        this.nettoinkomstPerManad = nettoinkomst;
-        this.boendekostnadPerManad = boendekostnad;
-        this.sammanlevande = sammanlevande;
-        this.barnensFodelsear.clear();
-        this.barnensFodelsear.addAll(barnensFodelsear);
+    void bytEkonomi(Ekonomi ny) {
+        this.ekonomi = ny;
     }
 
-    /// Översätter till regelverkets `Hushall`. Barnens ålder räknas fram per "idag".
-    Hushall hushall(LocalDate idag) {
-        List<Integer> aldrar = barnensFodelsear.stream().map(ar -> idag.getYear() - ar).toList();
-        return new Hushall(nettoinkomstPerManad, boendekostnadPerManad, sammanlevande, aldrar);
+    String fulltNamn() {
+        return fornamn + " " + efternamn;
     }
 
     @Nullable Long getId() { return id; }
     Personnummer getPersonnummer() { return personnummer; }
-    String getFornamn() { return fornamn; }
-    String getEfternamn() { return efternamn; }
     String getAdress() { return adress; }
-    BigDecimal getNettoinkomstPerManad() { return nettoinkomstPerManad; }
-    BigDecimal getBoendekostnadPerManad() { return boendekostnadPerManad; }
-    boolean isSammanlevande() { return sammanlevande; }
-    List<Integer> getBarnensFodelsear() { return List.copyOf(barnensFodelsear); }
+    Ekonomi getEkonomi() { return ekonomi; }
 }

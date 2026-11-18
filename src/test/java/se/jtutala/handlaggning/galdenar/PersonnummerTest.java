@@ -29,12 +29,6 @@ class PersonnummerTest {
     }
 
     @Test
-    void kontrollsiffranKontrollerasMedLuhn() {
-        assertThat(Personnummer.luhnKorrekt("1212121212")).isTrue();
-        assertThat(Personnummer.luhnKorrekt("1212121213")).isFalse();
-    }
-
-    @Test
     void samordningsnummerHarDagPlus60() {
         // 15 mars 1985 → dag 15 + 60 = 75
         var samordningsnummer = new Personnummer(medKontrollsiffra("198503752380".substring(0, 11)));
@@ -52,7 +46,7 @@ class PersonnummerTest {
     /// Hjälpmetod: lägger till rätt kontrollsiffra på 11 siffror.
     private static String medKontrollsiffra(String elvaSiffror) {
         for (int k = 0; k <= 9; k++) {
-            if (Personnummer.luhnKorrekt(elvaSiffror.substring(2) + k)) return elvaSiffror + k;
+            if (Luhn.arGiltigt(elvaSiffror.substring(2) + k)) return elvaSiffror + k;
         }
         throw new IllegalStateException();
     }

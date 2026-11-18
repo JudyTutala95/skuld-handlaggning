@@ -5,22 +5,18 @@ import java.time.LocalDate;
 
 /// Ett svenskt personnummer som **värdeobjekt**: kan inte skapas i ogiltigt skick.
 ///
-/// Lagras som 12 siffror: `ÅÅÅÅMMDDNNNK`.
-/// - `NNN` = födelsenummer, `K` = kontrollsiffra beräknad med Luhn-algoritmen.
-/// - Samordningsnummer (för personer som inte är folkbokförda) har dag + 60, t.ex. `19850375`.
+/// Lagras som 12 siffror: `ÅÅÅÅMMDDNNNK` där `K` är en kontrollsiffra (se `Luhn`).
+/// Samordningsnummer har dag + 60, t.ex. `19850375`.
 ///
-/// Personnummer är känsliga personuppgifter (GDPR). Använd `maskerat()` i loggar och listor,
-/// och skicka dem aldrig i URL:er – de hamnar då i loggar och webbläsarhistorik.
+/// Personnummer är känsliga personuppgifter. `toString()` maskerar därför numret.
 public record Personnummer(String varde) {
 
+    private static final int SAMORDNINGSTILLAGG = 60;
+
     public Personnummer {
-        if (!varde.matches("\\d{12}")) {
-            throw new IllegalArgumentException("personnummer ska ha 12 siffror (ÅÅÅÅMMDD-NNNN)");
-        }
-        fodelsedatum(varde); // kastar om datumet är ogiltigt
-        if (!luhnKorrekt(varde.substring(2))) {
-            throw new IllegalArgumentException("personnumrets kontrollsiffra stämmer inte");
-        }
+        kontrolleraFormat(varde);
+        fodelsedatum(varde);
+        kontrolleraKontrollsiffra(varde);
     }
 
     /// Tolkar `ÅÅÅÅMMDD-NNNN` eller `ÅÅÅÅMMDDNNNN`.
@@ -42,35 +38,36 @@ public record Personnummer(String varde) {
     }
 
     public boolean arSamordningsnummer() {
-        return Integer.parseInt(varde.substring(6, 8)) > 60;
+        return dagsiffror(varde) > SAMORDNINGSTILLAGG;
+    }
+
+    @Override
+    public String toString() {
+        return maskerat();
+    }
+
+    private static void kontrolleraFormat(String varde) {
+        if (!varde.matches("\\d{12}")) {
+            throw new IllegalArgumentException("personnummer ska ha 12 siffror (ÅÅÅÅMMDD-NNNN)");
+        }
+    }
+
+    private static void kontrolleraKontrollsiffra(String varde) {
+        if (!Luhn.arGiltigt(varde.substring(2))) {
+            throw new IllegalArgumentException("personnumrets kontrollsiffra stämmer inte");
+        }
     }
 
     private static LocalDate fodelsedatum(String varde) {
-        int ar = Integer.parseInt(varde.substring(0, 4));
-        int manad = Integer.parseInt(varde.substring(4, 6));
-        int dag = Integer.parseInt(varde.substring(6, 8));
-        if (dag > 60) dag -= 60; // samordningsnummer
+        int dag = dagsiffror(varde) % SAMORDNINGSTILLAGG;
         try {
-            return LocalDate.of(ar, manad, dag);
+            return LocalDate.of(Integer.parseInt(varde.substring(0, 4)), Integer.parseInt(varde.substring(4, 6)), dag);
         } catch (DateTimeException e) {
             throw new IllegalArgumentException("personnumret innehåller ett ogiltigt datum");
         }
     }
 
-    /// Luhn-algoritmen på de 10 sista siffrorna:
-    /// varannan siffra (från vänster, start på första) dubbleras, siffersumman ska vara delbar med 10.
-    static boolean luhnKorrekt(String tioSiffror) {
-        int summa = 0;
-        for (int i = 0; i < tioSiffror.length(); i++) {
-            int siffra = tioSiffror.charAt(i) - '0';
-            int produkt = (i % 2 == 0) ? siffra * 2 : siffra;
-            summa += produkt > 9 ? produkt - 9 : produkt;
-        }
-        return summa % 10 == 0;
-    }
-
-    @Override
-    public String toString() {
-        return maskerat(); // läck aldrig hela numret via toString (loggar!)
+    private static int dagsiffror(String varde) {
+        return Integer.parseInt(varde.substring(6, 8));
     }
 }
