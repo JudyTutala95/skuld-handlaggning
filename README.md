@@ -20,7 +20,7 @@ Byggt för att vara **enkelt att läsa** och visa **modern arkitektur** med Java
 
 1. [Kom igång](#kom-igång)
 2. [Domänen: vad gör Kronofogden?](#domänen-vad-gör-kronofogden)
-3. [Arkitektur](#arkitektur)
+3. [Arkitektur](#arkitektur) – och [alla diagram](docs/diagram.md)
 4. [Ärendets livscykel](#ärendets-livscykel)
 5. [Regelverket i koden](#regelverket-i-koden)
 6. [API](#api)
@@ -94,6 +94,9 @@ Kronofogden ska föra **dagbok** i varje mål. I systemet skrivs varje händelse
 
 ## Arkitektur
 
+> 📊 **Alla diagram finns i [`docs/diagram.md`](docs/diagram.md)**: helhetsbild, moduler, lager,
+> processkedjan, statusflöden, klassdiagram, sekvensdiagram och databasen.
+
 ### Modulär monolit
 
 Systemet är **en** applikation (enkel att köra och driftsätta) men uppdelad i **moduler** med
@@ -109,19 +112,20 @@ se.jtutala.handlaggning
 └── common/         Felhantering och klocka (delas av alla)
 ```
 
-```
-          ┌──────────────┐
-          │  regelverk   │  ◀── ren affärslogik, lättast att testa
-          └──────▲───────┘
-                 │
-     ┌───────────┴───────────┐
-┌────┴─────┐            ┌────┴─────┐
-│ galdenar │ ◀───────── │  arende  │
-└──────────┘  API-anrop └────┬─────┘
-                             │ ArendeStatusAndrad (händelse)
-                        ┌────▼────────┐
-                        │ notifiering │
-                        └─────────────┘
+```mermaid
+flowchart TB
+    arende["📁 arende<br/>ärenden och processer"]
+    galdenar["📁 galdenar<br/>gäldenärer och ekonomi"]
+    regelverk["📁 regelverk<br/>ren Java – normalbelopp,<br/>förbehållsbelopp, preskription"]
+    notifiering["📁 notifiering<br/>brev till gäldenären"]
+    common["📁 common<br/>felhantering, kalender"]
+
+    arende -->|anropar publikt API| galdenar
+    arende --> regelverk
+    galdenar --> regelverk
+    arende -. "händelse: ArendeStatusAndrad" .-> notifiering
+    arende --> common
+    galdenar --> common
 ```
 
 **Regler som Spring Modulith kontrollerar** (`ModulStrukturTest`):
@@ -134,10 +138,13 @@ Testet genererar också diagram till `target/spring-modulith-docs/`.
 
 ### Lagren inuti en modul
 
-```
-HTTP ──▶ Controller ──▶ Service (användningsfall) ──▶ Domänobjekt (regler) ──▶ Repository ──▶ DB
-         tar emot DTO    hämta → anropa → spara        Arende.delge(), bestrid()…
-         validerar       returnerar DTO
+```mermaid
+flowchart LR
+    HTTP(["HTTP"]) --> CTRL["Controller<br/>DTO + @Valid"]
+    CTRL --> UC["Användningsfall<br/>hämta → utför → spara"]
+    UC --> DOM["Domänobjekt<br/>affärsreglerna"]
+    UC --> LAGER["Arendelager"] --> REPO["Repository"] --> DB[("DB")]
+    UC --> MAP["Mapper"] --> SVAR(["JSON-svar"])
 ```
 
 ### Clean code: ett ansvar per klass och metod
