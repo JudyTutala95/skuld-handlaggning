@@ -1,0 +1,72 @@
+### Starta först: ./mvnw spring-boot:run
+### Exempeldata: gäldenär 1–3 (Anna, Bertil, Cecilia) och ärende 1–3.
+
+### Sök gäldenär på personnummer (POST – personnummer ska inte stå i URL:en)
+POST http://localhost:8080/api/galdenarer/sok
+Content-Type: application/json
+
+{ "personnummer": "19850315-2384" }
+
+### Hur mycket av Annas lön kan utmätas?
+GET http://localhost:8080/api/galdenarer/1/forbehallsbelopp
+
+### Bertil: sambo med två barn
+GET http://localhost:8080/api/galdenarer/2/forbehallsbelopp
+
+### Arbetslista: alla registrerade ärenden
+GET http://localhost:8080/api/arenden?status=REGISTRERAT
+
+### Ärende 1 med dagbok och möjliga nästa steg
+GET http://localhost:8080/api/arenden/1
+
+### ---------- Betalningsföreläggande (ärende 1) ----------
+
+### Delgivning
+POST http://localhost:8080/api/arenden/1/delgivning
+Content-Type: application/json
+
+{ "datum": "2026-05-10" }
+
+### Utslag (fristen har gått ut)
+POST http://localhost:8080/api/arenden/1/utslag
+
+### Verkställighet → nytt utsökningsärende
+POST http://localhost:8080/api/arenden/1/verkstallighet
+Content-Type: application/json
+
+{ "handlaggare": "handlaggare.omar" }
+
+### ---------- Utsökning (ärende 2, allmänt mål, redan under utredning) ----------
+
+### Löneutmätning – beloppet räknas ut automatiskt
+POST http://localhost:8080/api/arenden/2/loneutmatning
+
+### Inbetalning
+POST http://localhost:8080/api/arenden/2/inbetalningar
+Content-Type: application/json
+
+{ "belopp": 19005.00, "datum": "2026-11-25" }
+
+### ---------- Skuldsanering (ärende 3) ----------
+
+POST http://localhost:8080/api/arenden/3/utredning
+
+###
+POST http://localhost:8080/api/arenden/3/skuldsanering/beslut
+Content-Type: application/json
+
+{ "beviljas": true, "motivering": "Kvalificerat insolvent, skulderna kan inte betalas inom överskådlig tid." }
+
+### ---------- Nytt ärende ----------
+POST http://localhost:8080/api/arenden
+Content-Type: application/json
+
+{
+  "typ": "UTSOKNING",
+  "maltyp": "ALLMANT",
+  "galdenarId": 3,
+  "borgenar": "Transportstyrelsen",
+  "kapitalbelopp": 1300.00,
+  "forfallodag": "2026-06-30",
+  "handlaggare": "handlaggare.lisa"
+}
