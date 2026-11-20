@@ -1,5 +1,7 @@
-### Starta först: ./mvnw spring-boot:run
+### Starta först: docker compose up --build
+### Alla anrop går via gatewayen på port 8080 (eller GATEWAY_PORT).
 ### Exempeldata: gäldenär 1–3 (Anna, Bertil, Cecilia) och ärende 1–3.
+### Brev till gäldenärerna: docker compose logs -f notifiering-service
 
 ### Sök gäldenär på personnummer (POST – personnummer ska inte stå i URL:en)
 POST http://localhost:8080/api/galdenarer/sok

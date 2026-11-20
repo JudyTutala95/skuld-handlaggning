@@ -6,8 +6,17 @@ on:
   pull_request:
 
 jobs:
+  # Varje tjänst byggs och testas för sig – precis som när de utvecklas.
+  # Docker finns på GitHubs runners, så även testerna med Testcontainers (Kafka) körs.
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tjanst: [galdenar-service, arende-service, notifiering-service, gateway]
+    defaults:
+      run:
+        working-directory: ${{ matrix.tjanst }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -15,5 +24,14 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: maven
+          cache-dependency-path: ${{ matrix.tjanst }}/pom.xml
       - name: Bygg och kör alla tester
         run: ./mvnw -B verify
+
+  # Kontrollerar att alla Docker-images går att bygga och att compose-filen är giltig
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - run: docker compose build

@@ -4,16 +4,16 @@ Diagrammen är skrivna i [Mermaid](https://mermaid.js.org) och visas direkt på 
 IntelliJ/VS Code (med Mermaid-tillägg). Läs dem uppifrån och ned: från helheten till detaljerna.
 
 1. [Helhetsbild](#1-helhetsbild)
-2. [Moduler och beroenden](#2-moduler-och-beroenden)
+2. [Tjänster och hur de pratar](#2-tjänster-och-hur-de-pratar)
 3. [Lagren i ett anrop](#3-lagren-i-ett-anrop)
 4. [Processkedjan: från krav till betald skuld](#4-processkedjan-från-krav-till-betald-skuld)
 5. [Statusflöden](#5-statusflöden)
 6. [Klassdiagram: ärenden](#6-klassdiagram-ärenden)
-7. [Klassdiagram: ärendemodulens lager](#7-klassdiagram-ärendemodulens-lager)
-8. [Klassdiagram: gäldenär, regelverk och notifiering](#8-klassdiagram-gäldenär-regelverk-och-notifiering)
-9. [Sekvens: delgivning och brev](#9-sekvens-delgivning-och-brev)
-10. [Sekvens: löneutmätning över modulgränsen](#10-sekvens-löneutmätning-över-modulgränsen)
-11. [Databas](#11-databas)
+7. [Klassdiagram: ärendetjänstens lager](#7-klassdiagram-ärendetjänstens-lager)
+8. [Klassdiagram: gäldenärstjänsten och notifieringstjänsten](#8-klassdiagram-gäldenärstjänsten-och-notifieringstjänsten)
+9. [Sekvens: delgivning och brev via Kafka](#9-sekvens-delgivning-och-brev-via-kafka)
+10. [Sekvens: löneutmätning över tjänstegränsen](#10-sekvens-löneutmätning-över-tjänstegränsen)
+11. [Databaser](#11-databaser)
 
 ---
 
@@ -27,69 +27,88 @@ flowchart LR
     B(["🏢 Borgenär<br/>t.ex. inkassobolag"])
     G(["🧑 Gäldenär"])
 
-    subgraph APP["Spring Boot-applikationen"]
+    subgraph SYS["Docker Compose"]
         direction TB
-        API["REST-API<br/>/api/galdenarer<br/>/api/arenden"]
-        MOD["Moduler<br/>galdenar · arende · regelverk · notifiering · common"]
-        API --> MOD
+        GW["gateway<br/>:8080"]
+        GS["galdenar-service"]
+        AS["arende-service"]
+        NS["notifiering-service"]
+        K[["Kafka"]]
+        GW --> GS
+        GW --> AS
+        AS --> GS
+        AS --> K --> NS
     end
 
-    DB[("H2-databas<br/>schema via Flyway")]
     LOG["📬 Brev<br/>(loggas)"]
+    J["🔍 Jaeger<br/>spårning"]
 
-    H -->|registrerar och handlägger ärenden| API
+    H -->|registrerar och handlägger ärenden| GW
     B -.->|ansöker – via handläggaren| H
-    MOD --> DB
-    MOD --> LOG
+    NS --> LOG
     LOG -.->|skickas till| G
+    SYS -.->|traces| J
 ```
 
 ---
 
-## 2. Moduler och beroenden
+## 2. Tjänster och hur de pratar
 
-Varje modul är ett paket. Det som ligger **direkt i modulens paket** är dess publika API;
-allt i underpaketen (`web`, `service`, `domain` …) är internt. Pilarna visar vem som **får**
-anropa vem – Spring Modulith kontrollerar det i `ModulStrukturTest`.
+Fyra fristående tjänster. Heldragna pilar är **synkrona** HTTP-anrop (svaret behövs direkt).
+Den streckade vägen via Kafka är **asynkron**: ärendetjänsten vet inte vem som lyssnar.
 
 ```mermaid
 flowchart TB
-    subgraph arende["📁 arende"]
-        A_API["Publikt API<br/>ArendeStatusAndrad · Arendestatus · Arendetyp"]
-        A_INT["internt: web · dto · service · domain · repository"]
+    klient(["Klient"])
+
+    subgraph gateway["gateway :8080"]
+        R["Rutter<br/>/api/galdenarer/** → galdenar-service<br/>/api/arenden/** → arende-service"]
     end
 
-    subgraph galdenar["📁 galdenar"]
-        G_API["Publikt API<br/>GaldenarApi"]
-        G_INT["internt: web · dto · service · domain · repository"]
+    subgraph galdenar["galdenar-service :8081"]
+        G_API["REST-API<br/>GET /api/galdenarer/{id}<br/>GET /api/galdenarer/{id}/forbehallsbelopp"]
+        G_INT["web · dto · service · domain · regelverk · repository"]
     end
 
-    subgraph regelverk["📁 regelverk (ren Java)"]
-        R_API["Forbehallsbelopp · Normalbelopp<br/>Preskription · Hushall · Maltyp"]
+    subgraph arende["arende-service :8082"]
+        A_INT["web · dto · service · domain · regelverk · repository"]
+        A_KL["integration<br/>Galdenarregister → GaldenarKlient"]
+        A_OUT[("event_publication<br/>outbox")]
     end
 
-    subgraph notifiering["📁 notifiering"]
+    subgraph notifiering["notifiering-service :8083"]
         N["BrevUtskick · Brevmall · Brevlada"]
     end
 
-    subgraph common["📁 common (OPEN)"]
-        C["Kalender · GlobalFelhanterare<br/>RegelbrottException · HittadesInteException"]
-    end
+    K[["Kafka<br/>ämne: arende-status<br/>3 partitioner, nyckel = ärende-id"]]
+    GDB[("galdenar-db")]
+    ADB[("arende-db")]
 
-    A_INT -->|"GaldenarApi:<br/>kontrolleraAttFinns,<br/>forbehallsberakning"| G_API
-    A_INT -->|preskription| regelverk
-    G_INT -->|förbehållsbelopp| regelverk
-    A_API -. "händelse: ArendeStatusAndrad" .-> N
-    arende --> common
-    galdenar --> common
+    klient --> R
+    R --> G_API
+    R --> A_INT
+    A_INT --> A_KL
+    A_KL -->|"HTTP + retry"| G_API
+    G_API --- G_INT --- GDB
+    A_INT --- ADB
+    A_INT -->|"samma transaktion"| A_OUT
+    A_OUT -. "ArendeStatusAndrad (JSON)" .-> K
+    K -. "@KafkaListener" .-> N
 ```
+
+| Tjänst | Databas | Tar emot | Skickar |
+|---|---|---|---|
+| `gateway` | – | alla klientanrop | vidare till rätt tjänst |
+| `galdenar-service` | `galdenar-db` | REST | – |
+| `arende-service` | `arende-db` | REST | REST till gäldenärstjänsten, händelser till Kafka |
+| `notifiering-service` | – | händelser från Kafka | brev |
 
 ---
 
 ## 3. Lagren i ett anrop
 
-Varje modul är uppdelad i samma lager. Pilarna är de **enda** tillåtna beroendena –
-`LagerArkitekturTest` (ArchUnit) underkänner bygget om någon bryter mot dem.
+Ärende- och gäldenärstjänsten är uppdelade i samma lager. Pilarna är de **enda** tillåtna
+beroendena – `LagerArkitekturTest` (ArchUnit) underkänner bygget om någon bryter mot dem.
 
 ```mermaid
 flowchart TB
@@ -112,7 +131,11 @@ flowchart TB
     subgraph repository["repository"]
         REPO["*Repository<br/>Spring Data JPA"]
     end
+    subgraph integration["integration (bara arende-service)"]
+        INT["Galdenarregister<br/>retry, 404 → HittadesInteException"]
+    end
     DB[("Databas")]
+    EXT(["gäldenärstjänsten"])
     FEL["GlobalFelhanterare<br/>(common) → Problem Details"]
 
     HTTP --> CTRL
@@ -124,6 +147,7 @@ flowchart TB
     MAP -.-> REQ
     MAP -.-> DOM
     REPO -.-> DOM
+    SVC --> INT -->|HTTP| EXT
     DOM -. "RegelbrottException" .-> FEL
     FEL -. "409 Conflict" .-> HTTP
 ```
@@ -131,10 +155,12 @@ flowchart TB
 | Lager | Får använda | Får inte använda |
 |---|---|---|
 | `web` | `service`, `dto` | `repository`, `domain` |
-| `service` | `repository`, `domain`, `dto`, andra modulers API | `web` |
+| `service` | `repository`, `domain`, `dto`, `integration` | `web` |
 | `repository` | `domain` | `service`, `web`, `dto` |
 | `domain` | `regelverk`, `common` | alla lager ovan |
-| `dto` | – | alla lager |
+| `integration` | – | används bara av `service` |
+| `regelverk` | inget annat lager | – |
+| `dto` | `regelverk` | alla lager |
 
 ---
 
@@ -363,10 +389,10 @@ classDiagram
 
 ---
 
-## 7. Klassdiagram: ärendemodulens lager
+## 7. Klassdiagram: ärendetjänstens lager
 
 En controller och en service per process. Alla services delar på `ArendeHamtare` (hämta/spara via
-repository) och `ArendeMapper` (DTO ⇄ domän). Gäldenärsmodulen nås bara via `GaldenarApi`.
+repository) och `ArendeMapper` (DTO ⇄ domän). Gäldenärstjänsten nås bara via `Galdenarregister`.
 
 ```mermaid
 classDiagram
@@ -436,10 +462,16 @@ classDiagram
         }
     }
 
-    class GaldenarApi {
-        <<interface>>
-        +kontrolleraAttFinns(id)
-        +forbehallsberakning(id)
+    namespace integration {
+        class Galdenarregister {
+            +kontrolleraAttFinns(id)
+            +utmatningsbartBelopp(id) BigDecimal
+        }
+        class GaldenarKlient {
+            <<HTTP Service Client>>
+            +hamta(id)
+            +forbehallsbelopp(id) ForbehallsberakningSvar
+        }
     }
 
     ArendeController --> ArendeRegistreringService
@@ -450,8 +482,9 @@ classDiagram
     SkuldsaneringController --> SkuldsaneringService
 
     ArendeRegistreringService --> ArendeFabrik
-    ArendeRegistreringService --> GaldenarApi
-    UtsokningService --> GaldenarApi
+    ArendeRegistreringService --> Galdenarregister
+    UtsokningService --> Galdenarregister
+    Galdenarregister --> GaldenarKlient
 
     ArendeRegistreringService --> ArendeHamtare
     ArendeSokService --> ArendeHamtare
@@ -470,19 +503,15 @@ classDiagram
 
 ---
 
-## 8. Klassdiagram: gäldenär, regelverk och notifiering
+## 8. Klassdiagram: gäldenärstjänsten och notifieringstjänsten
 
-`GaldenarApi` ligger direkt i modulens paket och är det enda andra moduler ser.
+Två separata tjänster i samma bild. Gäldenärstjänsten har inget Java-API för andra – bara REST.
+Notifieringstjänsten har sin egen kopia av `ArendeStatusAndrad` och delar bara JSON-formatet
+med ärendetjänsten.
 
 ```mermaid
 classDiagram
     direction LR
-
-    class GaldenarApi {
-        <<interface>>
-        +kontrolleraAttFinns(id)
-        +forbehallsberakning(id) Forbehallsberakning
-    }
 
     namespace galdenar_web {
         class GaldenarController
@@ -490,7 +519,6 @@ classDiagram
     }
 
     namespace galdenar_service {
-        class GaldenarApiService
         class GaldenarRegistreringService {
             +registrera(RegistreraGaldenarRequest) GaldenarResponse
         }
@@ -533,7 +561,7 @@ classDiagram
         }
     }
 
-    namespace regelverk {
+    namespace galdenar_regelverk {
         class Forbehallsbelopp {
             +berakna(hushall, normalbelopp)$ Forbehallsberakning
         }
@@ -549,14 +577,15 @@ classDiagram
             <<record>>
             utmatningsbartBelopp
         }
-        class Preskription {
-            +preskriptionsdag(...)$ LocalDate
-        }
     }
 
-    namespace notifiering {
+    namespace notifiering_service {
         class BrevUtskick {
-            +nar(ArendeStatusAndrad)
+            +nar(String json)
+        }
+        class ArendeStatusAndrad {
+            <<record>>
+            till : String
         }
         class Brevmall {
             +textFor(handelse)$ Optional
@@ -572,9 +601,6 @@ classDiagram
     GaldenarController --> GaldenarSokService
     GaldenarEkonomiController --> GaldenarEkonomiService
     GaldenarEkonomiService --> GaldenarSokService
-    GaldenarApi <|.. GaldenarApiService
-    GaldenarApiService --> GaldenarSokService
-    GaldenarApiService --> GaldenarEkonomiService
     GaldenarRegistreringService --> GaldenarRepository
     GaldenarSokService --> GaldenarRepository
     GaldenarRegistreringService ..> GaldenarMapper
@@ -588,6 +614,7 @@ classDiagram
     Forbehallsbelopp ..> Hushall
     Forbehallsbelopp ..> Forbehallsberakning : skapar
 
+    BrevUtskick ..> ArendeStatusAndrad : läser JSON till
     BrevUtskick --> Brevmall
     BrevUtskick --> Brevlada
     Brevlada <|.. LoggandeBrevlada
@@ -595,51 +622,48 @@ classDiagram
 
 ---
 
-## 9. Sekvens: delgivning och brev
+## 9. Sekvens: delgivning och brev via Kafka
 
-Vad händer när handläggaren registrerar en delgivning? Notera att brevet skickas
-**efter** att transaktionen committats, på en annan tråd.
+Vad händer när handläggaren registrerar en delgivning? Händelsen sparas i **samma transaktion**
+som ärendet (outbox). Först efter commit skickas den till Kafka, och notifieringstjänsten tar
+emot den i sin egen takt.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor H as Handläggare
-    participant C as BetalningsforelaggandeController
-    participant UC as BetalningsforelaggandeService
-    participant L as ArendeHamtare
+    participant GW as gateway
+    participant UC as BetalningsforelaggandeService<br/>(arende-service)
     participant BF as Betalningsforelaggande
-    participant DB as Databas
-    participant N as BrevUtskick
+    participant DB as arende-db
+    participant M as Spring Modulith
+    participant K as Kafka<br/>arende-status
+    participant N as BrevUtskick<br/>(notifiering-service)
     participant BL as Brevlada
 
-    H->>C: POST /api/arenden/1/delgivning {"datum": "2026-05-10"}
-    C->>C: @Valid DelgivningRequest
-    C->>UC: delge(1, DelgivningRequest)
+    H->>GW: POST /api/arenden/1/delgivning {"datum": "2026-05-10"}
+    GW->>UC: vidare till arende-service
     activate UC
     Note over UC,DB: @Transactional startar
-    UC->>L: hamta(1, Betalningsforelaggande.class)
-    L->>DB: SELECT … FROM arende WHERE id = 1
-    DB-->>L: rad med typ = BETALNINGSFORELAGGANDE
-    L-->>UC: Betalningsforelaggande
+    UC->>DB: SELECT … FROM arende WHERE id = 1
     UC->>BF: delge(request.datum(), idag)
-    activate BF
-    BF->>BF: kontrolleraInteIFramtiden()
-    BF->>BF: bytStatus(DELGIVET) – kontrollerar Statusflode
-    BF->>BF: dagbok.anteckna("Gäldenären delgiven …")
-    BF->>BF: registerEvent(ArendeStatusAndrad)
-    deactivate BF
-    UC->>L: spara(bf)
-    L->>DB: UPDATE arende … / INSERT arende_dagbok
-    Note over L: Spring Data publicerar ArendeStatusAndrad
-    Note over UC,DB: COMMIT
-    UC-->>C: ArendeResponse (via ArendeMapper)
+    BF->>BF: bytStatus(DELGIVET) + dagbok + registerEvent(ArendeStatusAndrad)
+    UC->>DB: UPDATE arende / INSERT arende_dagbok
+    UC->>DB: INSERT event_publication (händelsen som JSON)
+    Note over UC,DB: COMMIT – ärende och händelse sparas tillsammans
+    UC-->>GW: 200 OK + ArendeResponse
     deactivate UC
-    C-->>H: 200 OK + JSON
+    GW-->>H: 200 OK
 
-    N-)N: @ApplicationModuleListener – asynkront efter commit
-    N->>N: Brevmall.textFor(handelse)
+    M-)K: send(nyckel "1", JSON) – efter commit
+    M->>DB: event_publication: COMPLETED
+    K-)N: @KafkaListener(groupId = "notifiering")
+    N->>N: JSON → ArendeStatusAndrad, Brevmall.textFor(...)
     N->>BL: skicka(galdenarId, "Du har fått ett betalningsföreläggande …")
 ```
+
+Är Kafka nere ligger händelsen kvar i `event_publication` och skickas när ärendetjänsten startar
+om. Är notifieringstjänsten nere väntar meddelandet i Kafka tills den är uppe igen.
 
 ### Om en regel bryts
 
@@ -648,65 +672,96 @@ sequenceDiagram
     actor H as Handläggare
     participant C as BetalningsforelaggandeController
     participant BF as Betalningsforelaggande
-    participant F as GlobalFelhanterare
+    participant F as GlobalFelhanterare<br/>(common)
 
     H->>C: POST /api/arenden/1/bestridande {"datum": "2026-05-25"}
     C->>BF: bestrid(…) via användningsfallet
     BF-->>C: RegelbrottException "Bestridandet kom in 2026-05-25, efter fristen 2026-05-20"
-    Note over C: transaktionen rullas tillbaka – inget sparas
+    Note over C: transaktionen rullas tillbaka – inget sparas, ingen händelse skickas
     C->>F: undantaget fångas
     F-->>H: 409 Conflict, application/problem+json
 ```
 
 ---
 
-## 10. Sekvens: löneutmätning över modulgränsen
+## 10. Sekvens: löneutmätning över tjänstegränsen
 
-Ärendemodulen frågar gäldenärsmodulen, som frågar regelverket. Ingen modul rör en annan
-moduls entiteter eller services – bara dess publika API (`GaldenarApi`).
+Ärendetjänsten frågar gäldenärstjänsten över HTTP. Service-lagret vet inte om det – det anropar
+bara `Galdenarregister`. Nätverket, retry och felöversättning ligger i `integration`.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor H as Handläggare
-    participant UC as UtsokningService<br/>(arende)
-    participant UTS as Utsokningsarende<br/>(arende)
-    participant API as GaldenarApi<br/>(galdenar, publikt)
-    participant GE as GaldenarEkonomiService<br/>(galdenar.service)
-    participant E as Ekonomi<br/>(galdenar)
+    participant UC as UtsokningService<br/>(arende-service)
+    participant UTS as Utsokningsarende
+    participant REG as Galdenarregister<br/>(integration)
+    participant KL as GaldenarKlient<br/>(HTTP Service Client)
+    participant API as GaldenarEkonomiController<br/>(galdenar-service)
+    participant GE as GaldenarEkonomiService
     participant FB as Forbehallsbelopp<br/>(regelverk)
 
     H->>UC: POST /api/arenden/2/loneutmatning
     UC->>UC: hamta(2) som Utsokningsarende
-    UC->>API: forbehallsberakning(galdenarId)
-    API->>GE: forbehallsberakning(galdenarId)
-    GE->>E: somHushall(idag)
-    E-->>GE: Hushall (inkomst, boende, sambo, barnens åldrar)
+    UC->>REG: utmatningsbartBelopp(galdenarId)
+    REG->>KL: forbehallsbelopp(galdenarId)
+    KL->>API: GET /api/galdenarer/2/forbehallsbelopp
+    API->>GE: forbehallsberakning(2)
     GE->>FB: berakna(hushall, Normalbelopp.AR_2026)
     Note right of FB: 34 000 − (9 495 + 5 500)<br/>= 19 005 kr/mån
     FB-->>GE: Forbehallsberakning
     GE-->>API: Forbehallsberakning
-    API-->>UC: utmätningsbart belopp = 19 005
+    API-->>KL: 200 OK + JSON
+    KL-->>REG: ForbehallsberakningSvar
+    REG-->>UC: 19 005
     UC->>UTS: beslutaLoneutmatning(19 005, idag)
     UTS->>UTS: kontrolleraUtmatningsbart() + bytStatus(LONEUTMATNING)
     UC-->>H: 200 OK, status LONEUTMATNING
 ```
 
+### Om gäldenärstjänsten inte svarar
+
+```mermaid
+sequenceDiagram
+    participant UC as UtsokningService
+    participant REG as Galdenarregister
+    participant G as galdenar-service
+    participant F as GlobalFelhanterare
+
+    UC->>REG: utmatningsbartBelopp(2)
+    REG-xG: försök 1 – ResourceAccessException
+    Note over REG: vänta 200 ms (@Retryable)
+    REG-xG: försök 2
+    Note over REG: vänta 400 ms
+    REG-xG: försök 3
+    REG-->>F: ResourceAccessException
+    F-->>UC: 503 Service Unavailable, "En tjänst svarar inte"
+    Note over UC: inget sparas – handläggaren kan försöka igen
+```
+
+Svarar gäldenärstjänsten **404** görs inget nytt försök. `Galdenarregister` gör om det till
+`HittadesInteException`, och ärendetjänsten svarar också 404.
+
 ---
 
-## 11. Databas
+## 11. Databaser
 
-Tabellerna skapas av Flyway (`V1__schema.sql`). Alla tre ärendetyper ligger i **samma tabell**
-`arende`; kolumnen `typ` avgör vilken Java-klass raden blir (JPA `SINGLE_TABLE`).
-Det finns ingen foreign key mellan `arende` och `galdenar` – modulerna äger sina egna tabeller.
+Varje tjänst har en **egen databas** med egna Flyway-migreringar (`db/migration/galdenar` och
+`db/migration/arende`). Ärendet har bara gäldenärens id – ingen foreign key, eftersom gäldenären
+finns i en annan databas. Alla tre ärendetyper ligger i **samma tabell** `arende`; kolumnen `typ`
+avgör vilken Java-klass raden blir (JPA `SINGLE_TABLE`).
+
+`event_publication` är outbox-tabellen. Spring Modulith skapar den och sparar varje händelse där
+innan den skickas till Kafka.
 
 ```mermaid
 erDiagram
     GALDENAR ||--o{ GALDENAR_BARN : "har barn"
-    GALDENAR ||..o{ ARENDE : "galdenar_id (ingen FK)"
+    GALDENAR ||..o{ ARENDE : "galdenar_id – annan databas"
     ARENDE ||--o{ ARENDE_DAGBOK : "dagbok"
     ARENDE ||--o{ ARENDE_INBETALNING : "inbetalningar (utsökning)"
     ARENDE |o--o{ ARENDE : "ursprungsarende_id (utslag → utsökning)"
+    ARENDE ||..o{ EVENT_PUBLICATION : "händelser (outbox)"
 
     GALDENAR {
         bigint id PK
@@ -754,9 +809,17 @@ erDiagram
         numeric belopp
         date datum
     }
+    EVENT_PUBLICATION {
+        uuid id PK
+        varchar event_type
+        varchar serialized_event "JSON"
+        timestamp publication_date
+        timestamp completion_date "satt när Kafka tagit emot"
+        varchar status
+    }
 ```
 
----
-
-> Spring Modulith genererar dessutom egna PlantUML-diagram över modulerna när testerna körs:
-> `target/spring-modulith-docs/components.puml` (se `ModulStrukturTest`).
+| Databas | Tabeller |
+|---|---|
+| `galdenar-db` | `galdenar`, `galdenar_barn` |
+| `arende-db` | `arende`, `arende_dagbok`, `arende_inbetalning`, `event_publication` |

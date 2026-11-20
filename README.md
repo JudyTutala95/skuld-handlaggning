@@ -1,18 +1,22 @@
 # Skuldhandläggning ⚖️
 
 Ett handläggningssystem för skuldärenden, inspirerat av hur **Kronofogden** arbetar.
-Byggt för att vara **enkelt att läsa** och visa **modern arkitektur** med Java 25 och Spring Boot 4.
+Byggt som **mikrotjänster** för att vara **enkelt att läsa** och visa **modern arkitektur** med
+Java 25, Spring Boot 4, Kafka och Docker.
 
 > ⚠️ Det här är ett lärprojekt. Det har ingen koppling till Kronofogdemyndigheten och reglerna är
 > förenklade (se [Förenklingar](#förenklingar)). Alla personer och personnummer i exempeldatan är påhittade.
 
-| Teknik | Version |
-|---|---|
-| Java | 25 |
-| Spring Boot / Framework | 4.1 / 7.0 |
-| Spring Modulith | 2.1 |
-| Hibernate | 7 |
-| Databas | H2 + Flyway |
+| Teknik | Version | Används till |
+|---|---|---|
+| Java | 25 | allt |
+| Spring Boot / Framework | 4.1 / 7.0 (gatewayen 4.2) | tjänsterna |
+| Spring Cloud Gateway | 2026.0 | en ingång för alla anrop |
+| Apache Kafka | 4.0 | händelser mellan tjänsterna |
+| Spring Modulith | 2.1 | outbox: händelser sparas innan de skickas till Kafka |
+| PostgreSQL / H2 + Flyway | 17 | en databas per tjänst (H2 när du kör lokalt) |
+| OpenTelemetry + Jaeger | – | följ ett anrop genom alla tjänster |
+| Testcontainers | 2 | riktig Kafka i testerna |
 
 ---
 
@@ -34,15 +38,20 @@ Byggt för att vara **enkelt att läsa** och visa **modern arkitektur** med Java
 
 ## Kom igång
 
-Kräver JDK 25 (`sdk env install` om du använder SDKMAN – versionen står i `.sdkmanrc`).
+### Hela systemet med Docker
+
+Kräver Docker. Allt byggs och startas med ett kommando:
 
 ```bash
-./mvnw spring-boot:run
+docker compose up --build
 ```
 
-```bash
-./mvnw test
-```
+| Adress | Vad |
+|---|---|
+| http://localhost:8080 | API:t, via gatewayen |
+| http://localhost:16686 | Jaeger: följ ett anrop genom alla tjänster |
+
+Är port 8080 upptagen, välj en annan: `GATEWAY_PORT=18080 docker compose up --build`.
 
 Prova API:t med [`requests.http`](requests.http) i IntelliJ/VS Code, eller:
 
@@ -50,7 +59,25 @@ Prova API:t med [`requests.http`](requests.http) i IntelliJ/VS Code, eller:
 curl -s localhost:8080/api/galdenarer/2/forbehallsbelopp
 ```
 
-H2-konsolen: http://localhost:8080/h2-console (JDBC URL `jdbc:h2:mem:handlaggning`, användare `sa`).
+Brev till gäldenärerna syns i notifieringstjänstens logg:
+
+```bash
+docker compose logs -f notifiering-service
+```
+
+### En tjänst i taget
+
+Varje tjänst är ett **eget Maven-projekt** med egen `pom.xml` och `mvnw`. Kräver JDK 25
+(`sdk env install` om du använder SDKMAN – versionen står i `.sdkmanrc`).
+
+```bash
+cd arende-service
+./mvnw test
+./mvnw spring-boot:run
+```
+
+Lokalt använder tjänsterna H2 i minnet. Ärendetjänsten behöver gäldenärstjänsten (port 8081)
+och Kafka (`docker compose up kafka`) för allt ska fungera.
 
 ---
 
@@ -94,66 +121,102 @@ Kronofogden ska föra **dagbok** i varje mål. I systemet skrivs varje händelse
 
 ## Arkitektur
 
-> 📊 **Alla diagram finns i [`docs/diagram.md`](docs/diagram.md)**: helhetsbild, moduler, lager,
-> processkedjan, statusflöden, klassdiagram, sekvensdiagram och databasen.
+> 📊 **Alla diagram finns i [`docs/diagram.md`](docs/diagram.md)**: helhetsbild, tjänster, lager,
+> processkedjan, statusflöden, klassdiagram, sekvensdiagram och databaserna.
 
-### Modulär monolit
+### Mikrotjänster
 
-Systemet är **en** applikation (enkel att köra och driftsätta) men uppdelad i **moduler** med
-tydliga gränser. Varje modul är ett paket. Det är dagens vanligaste rekommendation för nya system:
-börja med en modulär monolit, bryt ut mikrotjänster först när det verkligen behövs.
+Systemet består av fyra **fristående tjänster**. Varje tjänst har sin egen kod, sitt eget
+Maven-projekt, sin egen databas och kan byggas, testas och driftsättas utan de andra.
 
 ```
-se.jtutala.handlaggning
-├── regelverk/      Ren Java: normalbelopp, förbehållsbelopp, preskription. Inget Spring.
-├── galdenar/       Gäldenärer: personnummer, ekonomi, hushåll
-├── arende/         Ärenden: statusflöden, dagbok, inbetalningar (systemets kärna)
-├── notifiering/    Brev till gäldenären – lyssnar på händelser från arende
-└── common/         Felhantering och klocka (delas av alla)
+skuld-handlaggning/
+├── gateway/              port 8080 – enda ingången, skickar vidare till rätt tjänst
+├── galdenar-service/     port 8081 – gäldenärer, ekonomi, förbehållsbelopp   (egen PostgreSQL)
+├── arende-service/       port 8082 – ärenden, statusflöden, dagbok           (egen PostgreSQL)
+├── notifiering-service/  port 8083 – brev till gäldenären, lyssnar på Kafka  (ingen databas)
+└── docker-compose.yml    allt ovan + Kafka, två PostgreSQL och Jaeger
 ```
 
 ```mermaid
-flowchart TB
-    arende["📁 arende<br/>ärenden och processer"]
-    galdenar["📁 galdenar<br/>gäldenärer och ekonomi"]
-    regelverk["📁 regelverk<br/>ren Java – normalbelopp,<br/>förbehållsbelopp, preskription"]
-    notifiering["📁 notifiering<br/>brev till gäldenären"]
-    common["📁 common<br/>felhantering, kalender"]
-
-    arende -->|anropar publikt API| galdenar
-    arende --> regelverk
-    galdenar --> regelverk
-    arende -. "händelse: ArendeStatusAndrad" .-> notifiering
-    arende --> common
-    galdenar --> common
+flowchart LR
+    klient(["Klient"]) --> gateway["gateway<br/>:8080"]
+    gateway -->|/api/galdenarer/**| galdenar["galdenar-service<br/>:8081"]
+    gateway -->|/api/arenden/**| arende["arende-service<br/>:8082"]
+    arende -->|"REST (synkront)<br/>finns gäldenären?<br/>förbehållsbelopp?"| galdenar
+    arende -->|"ArendeStatusAndrad<br/>(asynkront)"| kafka[["Kafka<br/>arende-status"]]
+    kafka --> notifiering["notifiering-service<br/>:8083"]
+    galdenar --- gdb[("galdenar-db")]
+    arende --- adb[("arende-db")]
 ```
 
-**Regler som Spring Modulith kontrollerar** (`ModulStrukturTest`):
+**Varför de här gränserna?** Tjänsterna följer domänen: gäldenären (personen och ekonomin),
+ärendet (processen) och kommunikationen (brev). Varje tjänst äger sina data. Ingen tjänst läser en
+annan tjänsts databas – de frågar via API eller lyssnar på händelser.
 
-- En modul får bara använda det som ligger **direkt i en annan moduls paket** – dess publika API.
-  Allt i underpaketen (`web`, `service`, `domain` …) är internt. Ärendemodulen pratar därför med
-  gäldenärsmodulen via interfacet `GaldenarApi`, aldrig via dess services eller entiteter.
-- Inga cykliska beroenden. `arende` känner inte till `notifiering` – den publicerar bara en händelse.
+| Tjänst | Äger | Pratar med |
+|---|---|---|
+| `gateway` | inget | skickar anrop vidare (Spring Cloud Gateway) |
+| `galdenar-service` | gäldenärer, ekonomi, regelverket för förbehållsbelopp | ingen – andra frågar den |
+| `arende-service` | ärenden, dagbok, inbetalningar, regler för måltyp och preskription | gäldenärstjänsten (REST), Kafka (skickar) |
+| `notifiering-service` | inget | Kafka (tar emot) |
 
-Testet genererar också diagram till `target/spring-modulith-docs/`.
+#### Två sätt att prata
 
-### Lagren inuti en modul: controller → service → repository
+| | Synkront: REST | Asynkront: Kafka |
+|---|---|---|
+| När | Svaret behövs **nu** för att fatta beslutet | Någon annan ska **få veta** att något hänt |
+| Exempel | Finns gäldenären? Hur mycket kan utmätas? | Ärendet bytte status → skicka brev |
+| Kod | `GaldenarKlient` (HTTP Service Client) | `@Externalized` på `ArendeStatusAndrad`, `@KafkaListener` i `BrevUtskick` |
+| Om mottagaren är nere | Försök igen 2 gånger, sedan **503** | Inget märks – meddelandet väntar i Kafka |
+| Koppling | Ärendetjänsten känner till gäldenärstjänsten | Ärendetjänsten vet inte vem som lyssnar |
 
-Varje modul (`arende`, `galdenar`) är uppdelad i samma fem lager. Det publika API:t ligger direkt
-i modulens paket.
+#### Mönster som används
+
+| Mönster | Vad det löser | Var |
+|---|---|---|
+| **API Gateway** | Klienten behöver bara en adress. Rätt plats för inloggning och rate limiting. | `gateway/…/Rutter.java` |
+| **Databas per tjänst** | Tjänsterna kan ändra sina tabeller utan att störa varandra. | `docker-compose.yml`, `db/migration/<tjänst>` |
+| **HTTP Service Client** | Ett interface med `@GetExchange` – Spring skriver HTTP-koden. | `GaldenarKlient` |
+| **Retry med backoff** | Tillfälliga nätverksfel löser sig själva. Bara läsningar görs om. | `@Retryable` i `Galdenarregister` |
+| **Felöversättning** | 404 hos gäldenärstjänsten blir 404 hos oss; nere blir 503 – aldrig 500. | `Galdenarregister`, `GlobalFelhanterare` |
+| **Transactional outbox** | Händelsen sparas i samma transaktion som ärendet (`event_publication`). Är Kafka nere en kort stund försöker producenten igen; ligger händelsen kvar osänd skickas den när tjänsten startar om. | Spring Modulith, `application.properties` |
+| **Nyckel = ärende-id** | Alla händelser för ett ärende hamnar i samma partition och kommer i rätt ordning. | `@Externalized("arende-status::#{arendeId()}")` |
+| **Tolerant läsare** | Mottagaren läser bara de fält den behöver, och okända statusar ger inget brev i stället för fel. | `ForbehallsberakningSvar`, notifieringens `ArendeStatusAndrad` |
+| **Distribuerad spårning** | Samma trace-id följer anropet från gatewayen via REST och Kafka till brevet. | OpenTelemetry → Jaeger |
+| **Ingen delad kod** | Felhantering och klocka finns i varje tjänst (`common/`). Ett delat bibliotek skulle tvinga alla tjänster att släppas samtidigt. | `*/common/` |
+
+#### Vad kostar mikrotjänster?
+
+Den här koden var tidigare en **modulär monolit** (se git-historiken). Uppdelningen gör systemet
+mer flexibelt men också svårare:
+
+- **Nätverket kan fallera.** Därför retry, timeouts och 503.
+- **Ingen gemensam transaktion.** Ett ärende kan sparas medan brevet skickas lite senare
+  (*eventual consistency*). Outbox-mönstret gör att händelsen inte försvinner på vägen.
+- **Fler saker att köra.** Sju containrar i stället för en. Felsökning kräver spårning (Jaeger).
+- **Kontrakt mellan tjänster.** JSON-formaten får inte ändras hur som helst. Testerna
+  `GaldenarApiIntegrationTest` och `KafkaExternaliseringTest` vaktar dem.
+
+För ett system i den här storleken är en modulär monolit oftast det bättre valet i verkligheten.
+Mikrotjänster lönar sig när flera team ska kunna släppa ändringar oberoende av varandra, eller när
+delar av systemet behöver skalas olika.
+
+### Lagren inuti en tjänst: controller → service → repository
+
+`arende-service` och `galdenar-service` är uppdelade i samma lager:
 
 ```
-arende/
-├── ArendeStatusAndrad, Arendestatus, Arendetyp   ← publikt API (händelsen som andra moduler lyssnar på)
+arende-service/src/main/java/se/jtutala/handlaggning/arende/
+├── ArendeStatusAndrad, Arendestatus, Arendetyp   ← händelsen som skickas till Kafka
 ├── web/          *Controller   – HTTP in och ut, @Valid, inget annat
 ├── dto/          *Request, *Response – records som beskriver API:t
 ├── service/      *Service      – ett användningsfall per klass, @Transactional, mappning DTO ⇄ domän
 ├── domain/       entiteter och värdeobjekt – affärsreglerna, inget Spring Web
-└── repository/   *Repository   – Spring Data JPA
-
-galdenar/
-├── GaldenarApi                                   ← publikt API (används av arende)
-├── web/  dto/  service/  domain/  repository/
+├── regelverk/    ren Java: måltyp och preskription
+├── repository/   *Repository   – Spring Data JPA
+├── integration/  Galdenarregister + GaldenarKlient – anrop till gäldenärstjänsten
+└── common/       felhantering och klocka
 ```
 
 ```mermaid
@@ -165,6 +228,8 @@ flowchart LR
     REPO --> DB[("Databas")]
     SERVICE --> DOMAIN["domain<br/>entiteter + regler"]
     REPO --> DOMAIN
+    SERVICE --> INT["integration<br/>andra tjänster"]
+    INT -->|HTTP| EXT(["gäldenärstjänsten"])
     WEB -.-> DTO["dto"]
     SERVICE -.-> DTO
 ```
@@ -172,30 +237,36 @@ flowchart LR
 | Lager | Får använda | Får **inte** använda | Namn |
 |---|---|---|---|
 | `web` | `service`, `dto` | `repository`, `domain` | `*Controller` |
-| `service` | `repository`, `domain`, `dto`, andra modulers API | `web` | `*Service` |
+| `service` | `repository`, `domain`, `dto`, `integration` | `web` | `*Service` |
 | `repository` | `domain` | `service`, `web`, `dto` | `*Repository` (interface) |
-| `domain` | bara sig själv, `regelverk`, `common` | allt ovan | fritt, efter domänbegreppen |
-| `dto` | inget av lagren | `domain`, `service`, `web` | `*Request`, `*Response` (records) |
+| `domain` | sig själv, `regelverk`, `common` | allt ovan | fritt, efter domänbegreppen |
+| `integration` | – | används bara av `service` | `Galdenarregister` |
+| `regelverk` | inget annat lager | – | ren Java |
+| `dto` | `regelverk` | `domain`, `service`, `web` | `*Request`, `*Response` (records) |
 
 Viktiga följder:
 
 - **Entiteter lämnar aldrig service-lagret.** Controllers ser bara DTO:er.
 - **Mappningen DTO ⇄ domän sker på ett ställe**, i service-lagret (`ArendeMapper`, `GaldenarMapper`).
-  Varken DTO:erna eller domänen känner till varandra.
 - **Transaktionen börjar och slutar i servicen** (`@Transactional`). Där hämtas, ändras och sparas data.
+- **Service-lagret vet inte att gäldenären finns i en annan tjänst.** Det anropar `Galdenarregister`
+  som vilken klass som helst. Nätverket, retry och felöversättning ligger i `integration`.
 
-Reglerna kontrolleras av **ArchUnit** i [`LagerArkitekturTest`](src/test/java/se/jtutala/handlaggning/LagerArkitekturTest.java).
-Skriver någon en controller som anropar ett repository direkt misslyckas bygget:
+Reglerna kontrolleras av **ArchUnit** i `LagerArkitekturTest` (en per tjänst). Skriver någon en
+controller som anropar ett repository direkt misslyckas bygget:
 
 ```
 Constructor <...web.FelaktigController.<init>(...repository.ArendeRepository)>
 has parameter of type <...repository.ArendeRepository>
 ```
 
+Gränserna **mellan** tjänsterna behöver inget test: tjänsterna är separata projekt och kan inte se
+varandras klasser alls.
+
 ### Clean code: ett ansvar per klass och metod
 
 Varje klass ska bara ha **en anledning att ändras** (Single Responsibility Principle), och varje
-metod ska göra **en sak** – och heta det den gör. Så här är ansvaret fördelat i ärendemodulen:
+metod ska göra **en sak** – och heta det den gör. Så här är ansvaret fördelat i ärendetjänsten:
 
 | Ansvar | Klass |
 |---|---|
@@ -216,16 +287,20 @@ metod ska göra **en sak** – och heta det den gör. Så här är ansvaret för
 | Användningsfallet *läsa/arbetslista* | `ArendeSokService` |
 | Utredning och avskrivning (alla typer) | `ArendeAtgardService` |
 | Användningsfall per process | `BetalningsforelaggandeService`, `UtsokningService`, `SkuldsaneringService` |
+| Fråga gäldenärstjänsten: retry och felöversättning | `Galdenarregister` |
+| HTTP-anropen till gäldenärstjänsten | `GaldenarKlient` (interface) |
+| Skapa Kafka-ämnet | `KafkaKonfiguration` |
 | HTTP per process | `ArendeController`, `BetalningsforelaggandeController`, `UtsokningController`, `SkuldsaneringController` |
 | Ett kommando eller svar över HTTP | en record per fil: `DelgivningRequest`, `BestridandeRequest`, `ArendeResponse` … |
 
-Samma princip i övriga moduler:
+Samma princip i övriga tjänster:
 
-| Modul | Uppdelning |
+| Tjänst | Uppdelning |
 |---|---|
-| `galdenar` | `GaldenarRegistreringService` (skapa), `GaldenarSokService` (läsa), `GaldenarEkonomiService` (ekonomi och förbehållsbelopp), `Ekonomi` (hushållets uppgifter), `Luhn` (kontrollsiffran), `Personnummer` (värdeobjektet), `GaldenarMapper` |
-| `notifiering` | `BrevUtskick` (reagera på händelser), `Brevmall` (texten), `Brevlada`/`LoggandeBrevlada` (leveransen) |
-| `common` | `Kalender` (dagens datum), `GlobalFelhanterare` (undantag → HTTP), `Problemsvar` (svarsformatet) |
+| `galdenar-service` | `GaldenarRegistreringService` (skapa), `GaldenarSokService` (läsa), `GaldenarEkonomiService` (ekonomi och förbehållsbelopp), `Ekonomi` (hushållets uppgifter), `Luhn` (kontrollsiffran), `Personnummer` (värdeobjektet), `GaldenarMapper` |
+| `notifiering-service` | `BrevUtskick` (ta emot från Kafka), `Brevmall` (texten), `Brevlada`/`LoggandeBrevlada` (leveransen) |
+| `gateway` | `Rutter` (vilken sökväg går vart) |
+| `common` (i varje tjänst) | `Kalender` (dagens datum), `GlobalFelhanterare` (undantag → HTTP), `Problemsvar` (svarsformatet) |
 
 **Metoder:** regler bryts ut till små metoder med namn som förklarar dem, t.ex.
 
@@ -260,15 +335,15 @@ så frågan behövs inte. Att rätt typ hämtas kontrolleras på ett ställe: `A
 | **Tillståndsmaskin per typ** | Vilka statusbyten som är tillåtna står i ett `Statusflode` i respektive ärendeklass. | `Statusflode.java` |
 | **Task-based API** | En endpoint per åtgärd (`/bestridande`, `/utslag`) i stället för "sätt status". Servern äger reglerna. | `ArendeController` |
 | **Värdeobjekt** | `Personnummer` kan inte finnas i ogiltigt skick (Luhn, datum). | `Personnummer.java` |
-| **Domänhändelser** | `ArendeStatusAndrad` publiceras automatiskt när ärendet sparas (`AbstractAggregateRoot`). | `Arende`, `BrevUtskick` |
-| **Referens med id mellan moduler** | `Arende` har `galdenarId`, inte ett `Galdenar`-objekt. Ingen foreign key mellan modulernas tabeller. | `V1__schema.sql` |
+| **Domänhändelser** | `ArendeStatusAndrad` publiceras automatiskt när ärendet sparas (`AbstractAggregateRoot`) och skickas till Kafka. | `Arende`, `ArendeStatusAndrad` |
+| **Referens med id mellan tjänster** | `Arende` har `galdenarId`, inte ett `Galdenar`-objekt. Gäldenären finns i en annan databas. | `arende/V1__schema.sql` |
 | **Injicerad `Clock`** | Frister och preskription beror på "idag". Testerna styr datumet. | `KlockKonfiguration` |
 | **Problem Details (RFC 9457)** | Standardiserade felsvar med begripliga meddelanden. | `GlobalFelhanterare` |
 | **DTO:er som records** | API-kontraktet skilt från databasen. | `dto/` |
-| **Lager per modul** | controller → service → repository, kontrollerat av ArchUnit. | `LagerArkitekturTest` |
-| **Flyway** | Versionshanterat databasschema. | `db/migration` |
+| **Lager per tjänst** | controller → service → repository, kontrollerat av ArchUnit. | `LagerArkitekturTest` |
+| **Flyway** | Versionshanterat databasschema, en mapp per tjänst. | `db/migration/<tjänst>` |
 | **Optimistisk låsning** | `@Version` – två handläggare kan inte skriva över varandra. | entiteterna |
-| **Asynkrona händelselyssnare** | Brev skickas efter commit, utan att handläggaren väntar. | `@ApplicationModuleListener` |
+| **Asynkrona händelser** | Brev skickas via Kafka efter commit, utan att handläggaren väntar. | `@Externalized`, `@KafkaListener` |
 | **Virtuella trådar** | `spring.threads.virtual.enabled=true` | `application.properties` |
 
 ### Integritet (GDPR)
@@ -284,9 +359,9 @@ Personnummer är känsliga personuppgifter:
 ## Ärendets livscykel
 
 Statusflödena definieras som konstanten `FLODE` i respektive ärendeklass:
-[`Betalningsforelaggande`](src/main/java/se/jtutala/handlaggning/arende/Betalningsforelaggande.java),
-[`Utsokningsarende`](src/main/java/se/jtutala/handlaggning/arende/Utsokningsarende.java) och
-[`Skuldsaneringsarende`](src/main/java/se/jtutala/handlaggning/arende/Skuldsaneringsarende.java).
+[`Betalningsforelaggande`](arende-service/src/main/java/se/jtutala/handlaggning/arende/domain/Betalningsforelaggande.java),
+[`Utsokningsarende`](arende-service/src/main/java/se/jtutala/handlaggning/arende/domain/Utsokningsarende.java) och
+[`Skuldsaneringsarende`](arende-service/src/main/java/se/jtutala/handlaggning/arende/domain/Skuldsaneringsarende.java).
 
 **Betalningsföreläggande**
 ```
@@ -324,7 +399,7 @@ Exempel på regler som kontrolleras i ärendeklasserna:
 
 ## Regelverket i koden
 
-### Förbehållsbelopp ([`Forbehallsbelopp.java`](src/main/java/se/jtutala/handlaggning/regelverk/Forbehallsbelopp.java))
+### Förbehållsbelopp ([`Forbehallsbelopp.java`](galdenar-service/src/main/java/se/jtutala/handlaggning/galdenar/regelverk/Forbehallsbelopp.java))
 
 ```
 förbehållsbelopp      = normalbelopp + boendekostnad
@@ -349,7 +424,7 @@ utmätningsbart belopp = nettolön − förbehållsbelopp     (aldrig under 0, h
 hushållets normalbelopp 10 314 + 4 004 + 4 672 = 18 990, Bertils halva 9 495.
 Halva hyran 5 500. Förbehåll 14 995 → **19 005 kr/mån** kan utmätas.
 
-### Preskription ([`Preskription.java`](src/main/java/se/jtutala/handlaggning/regelverk/Preskription.java))
+### Preskription ([`Preskription.java`](arende-service/src/main/java/se/jtutala/handlaggning/arende/regelverk/Preskription.java))
 
 | Måltyp | Preskriberas |
 |---|---|
@@ -363,7 +438,10 @@ I systemet räknas en **inbetalning** eller en **delgivning** som preskriptionsa
 
 ## API
 
-### Gäldenärer
+Alla anrop går via gatewayen på port 8080. Den skickar `/api/galdenarer/**` till
+gäldenärstjänsten och `/api/arenden/**` till ärendetjänsten.
+
+### Gäldenärer (`galdenar-service`)
 
 | Metod | URL | Beskrivning |
 |---|---|---|
@@ -373,11 +451,11 @@ I systemet räknas en **inbetalning** eller en **delgivning** som preskriptionsa
 | PUT | `/api/galdenarer/{id}/ekonomi` | Inkomst, boende, hushåll |
 | GET | `/api/galdenarer/{id}/forbehallsbelopp` | Beräkning med alla delbelopp |
 
-### Ärenden
+### Ärenden (`arende-service`)
 
 | Metod | URL | Gäller | Beskrivning |
 |---|---|---|---|
-| POST | `/api/arenden` | alla | Registrera ärende |
+| POST | `/api/arenden` | alla | Registrera ärende (frågar gäldenärstjänsten om gäldenären finns) |
 | GET | `/api/arenden?status=&galdenarId=` | alla | Arbetslista |
 | GET | `/api/arenden/{id}` | alla | Ärende med dagbok och möjliga nästa steg |
 | POST | `/{id}/delgivning` | BF | `{ "datum": "2026-01-05" }` |
@@ -386,12 +464,23 @@ I systemet räknas en **inbetalning** eller en **delgivning** som preskriptionsa
 | POST | `/{id}/overlamning-tingsratt` | BF | Efter bestridande |
 | POST | `/{id}/verkstallighet` | BF | Skapar utsökningsärende (201) |
 | POST | `/{id}/utredning` | UTS, SKS | Påbörja utredning |
-| POST | `/{id}/loneutmatning` | UTS | Beloppet räknas ut automatiskt |
+| POST | `/{id}/loneutmatning` | UTS | Beloppet hämtas från gäldenärstjänsten |
 | POST | `/{id}/inbetalningar` | UTS | `{ "belopp": ..., "datum": ... }` |
 | POST | `/{id}/preskription` | UTS | Markera preskriberat |
 | POST | `/{id}/skuldsanering/beslut` | SKS | `{ "beviljas": true, "motivering": ... }` |
 | POST | `/{id}/skuldsanering/slutfor` | SKS | Efter 5 år |
 | POST | `/{id}/avskrivning` | alla | `{ "orsak": ... }` |
+
+Är gäldenärstjänsten nere svarar ärendetjänsten `503 Service Unavailable` efter tre försök.
+
+### Händelser (Kafka-ämnet `arende-status`)
+
+Nyckel: ärendets id. Värde:
+
+```json
+{ "arendeId": 1, "arendenummer": "BF-2026-000001", "galdenarId": 1,
+  "typ": "BETALNINGSFORELAGGANDE", "fran": "REGISTRERAT", "till": "DELGIVET" }
+```
 
 Svar för ett ärende (förkortat):
 
@@ -417,23 +506,42 @@ Svar för ett ärende (förkortat):
 
 ## Tester
 
+Varje tjänst testas för sig: `cd <tjänst> && ./mvnw test`. Tester med Testcontainers
+hoppas över om Docker inte är igång.
+
 ```
-HandlaggningIntegrationTest   hela kedjan via HTTP: BF → utslag → verkställighet → löneutmätning → betalt
-ModulStrukturTest             arkitekturen: modulgränser och inga cykler (Spring Modulith)
-LagerArkitekturTest           arkitekturen: lagren inuti modulerna och namnregler (ArchUnit)
-ArendeControllerTest          @WebMvcTest: validering, 400/404/409 som Problem Details
-BetalningsforelaggandeTest    reglerna för betalningsföreläggande – utan Spring
-UtsokningsarendeTest          reglerna för utsökning
-SkuldsaneringsarendeTest      reglerna för skuldsanering
-StatusflodeTest               tillståndsmaskinen
-ForbehallsbeloppTest          uträkningar med papper-och-penna-exempel
-PreskriptionTest              preskriptionsregler
-PersonnummerTest, LuhnTest    datum, samordningsnummer, maskering, kontrollsiffra
-EkonomiTest                   hushållets uppgifter och barnens ålder
-BrevmallTest                  vilka statusbyten som ger brev
+galdenar-service
+  GaldenarApiIntegrationTest    hela tjänsten via HTTP – och API:t som ärendetjänsten är beroende av
+  LagerArkitekturTest           lagren och namnreglerna (ArchUnit)
+  ForbehallsbeloppTest          uträkningar med papper-och-penna-exempel
+  PersonnummerTest, LuhnTest    datum, samordningsnummer, maskering, kontrollsiffra
+  EkonomiTest                   hushållets uppgifter och barnens ålder
+
+arende-service
+  HeltFlodeIntegrationTest      hela kedjan via HTTP: BF → utslag → verkställighet → löneutmätning → betalt,
+                                mot en låtsad gäldenärstjänst (riktig HTTP). Även 404 och 503 efter retry.
+  KafkaExternaliseringTest      statusbytet hamnar på Kafka med rätt nyckel och JSON (Testcontainers)
+  LagerArkitekturTest           lagren och namnreglerna (ArchUnit)
+  ArendeControllerTest          @WebMvcTest: validering, 400/404/409 som Problem Details
+  BetalningsforelaggandeTest    reglerna för betalningsföreläggande – utan Spring
+  UtsokningsarendeTest          reglerna för utsökning
+  SkuldsaneringsarendeTest      reglerna för skuldsanering
+  StatusflodeTest               tillståndsmaskinen
+  PreskriptionTest              preskriptionsregler
+
+notifiering-service
+  BrevUtskickKafkaTest          händelse på Kafka → brev; trasiga meddelanden stoppar inte kön (Testcontainers)
+  BrevmallTest                  vilka statusbyten som ger brev, okända statusar ignoreras
+
+gateway
+  RutterTest                    varje sökväg hamnar hos rätt tjänst
 ```
 
-Testklasserna följer produktionsklasserna: en testklass per klass med regler.
+**Kontrakt mellan tjänsterna.** Tjänsterna testas var för sig, så formaten mellan dem vaktas från
+båda håll: `LatsasGaldenartjanst` (i ärendetjänstens tester) svarar som gäldenärstjänsten, och
+`GaldenarApiIntegrationTest` kontrollerar att den riktiga tjänsten gör det. På samma sätt skickar
+`BrevUtskickKafkaTest` samma JSON-format som `KafkaExternaliseringTest` kontrollerar att ärendetjänsten skickar.
+
 De flesta testerna är rena enhetstester som körs på millisekunder. Det är möjligt för att
 affärslogiken ligger i vanliga Java-klasser och inte i Spring-beans.
 
@@ -451,7 +559,10 @@ Verkligheten är mer komplex. Medvetna förenklingar:
 - **Skuldsanering:** betalningsplan, borgenärernas yttranden och beräkning av skuldsaneringsbelopp saknas.
 - **En fordran per ärende.** I verkligheten kan ett mål innehålla flera.
 - **Utmätning av egendom** (bil, bostad, bankkonton) och **avhysning** finns inte med.
-- **Ingen inloggning eller behörighetsstyrning.**
+- **Ingen inloggning eller behörighetsstyrning.** Gatewayen är rätt plats att lägga till det.
+- **Ingen saga.** Bara en åtgärd (registrering) behöver en annan tjänst innan den sparar, och den
+  ändrar inget där. Åtgärder som ändrar data i flera tjänster skulle behöva en saga med kompensation.
+- **En instans per tjänst** och ingen service discovery – adresserna står i konfigurationen.
 
 ---
 
@@ -460,11 +571,13 @@ Verkligheten är mer komplex. Medvetna förenklingar:
 1. **Spring Security** med roller (handläggare, chef) och `@PreAuthorize` per åtgärd.
 2. **Egendomsutmätning** – ny ärendeåtgärd med registrering av tillgångar.
 3. **Ränta** – räkna dröjsmålsränta enligt räntelagen (referensränta + 8 procentenheter).
-4. **Brev som PDF** – ersätt loggningen i `BrevUtskick` med PDF-generering.
-5. **PostgreSQL + Testcontainers** i stället för H2.
-6. **Händelselogg med Spring Modulith Event Publication Registry** – garanterar att brev skickas även om appen kraschar.
-7. **Handläggarstöd** – endpoint som listar ärenden där fristen gått ut och utslag kan meddelas.
-8. **Ett gränssnitt** (React eller Thymeleaf) som visar `mojligaNastaStatusar` som knappar.
+4. **Brev som PDF** – ersätt `LoggandeBrevlada` med PDF-generering.
+5. **Inloggning i gatewayen** med OAuth2/JWT, som skickar vidare användaren till tjänsterna.
+6. **Circuit breaker** (Resilience4j) – sluta anropa gäldenärstjänsten en stund när den är nere.
+7. **Kontraktstester** med Spring Cloud Contract eller Pact i stället för handskrivna låtsastjänster.
+8. **Kubernetes** – kör flera instanser av varje tjänst.
+9. **Handläggarstöd** – endpoint som listar ärenden där fristen gått ut och utslag kan meddelas.
+10. **Ett gränssnitt** (React eller Thymeleaf) som visar `mojligaNastaStatusar` som knappar.
 
 ---
 

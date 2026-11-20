@@ -1,0 +1,124 @@
+# Hela systemet: fyra tjänster, två databaser, Kafka och Jaeger (spårning).
+#
+#   docker compose up --build
+#
+# Sedan:
+#   http://localhost:8080   API:t via gatewayen (byt port med GATEWAY_PORT=18080)
+#   http://localhost:16686  Jaeger – följ ett anrop genom alla tjänster
+#
+# Bara gatewayen, Jaeger och Kafka syns utanför Docker. Tjänsterna når varandra med
+# namnen nedan (t.ex. http://galdenar-service:8081) i Dockers eget nätverk.
+
+x-sparning: &sparning
+  MANAGEMENT_TRACING_EXPORT_ENABLED: "true"
+  MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+
+services:
+
+  # ---------- Tjänsterna ----------
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    environment:
+      <<: *sparning
+      TJANSTER_GALDENAR: http://galdenar-service:8081
+      TJANSTER_ARENDE: http://arende-service:8082
+    depends_on:
+      - galdenar-service
+      - arende-service
+
+  galdenar-service:
+    build: ./galdenar-service
+    environment:
+      <<: *sparning
+      SPRING_DATASOURCE_URL: jdbc:postgresql://galdenar-db:5432/galdenar
+      SPRING_DATASOURCE_USERNAME: galdenar
+      SPRING_DATASOURCE_PASSWORD: galdenar
+    depends_on:
+      galdenar-db:
+        condition: service_healthy
+
+  arende-service:
+    build: ./arende-service
+    environment:
+      <<: *sparning
+      SPRING_DATASOURCE_URL: jdbc:postgresql://arende-db:5432/arende
+      SPRING_DATASOURCE_USERNAME: arende
+      SPRING_DATASOURCE_PASSWORD: arende
+      SPRING_HTTP_SERVICECLIENT_GALDENAR_BASE_URL: http://galdenar-service:8081
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      arende-db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  notifiering-service:
+    build: ./notifiering-service
+    environment:
+      <<: *sparning
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ---------- En databas per tjänst ----------
+
+  galdenar-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: galdenar
+      POSTGRES_USER: galdenar
+      POSTGRES_PASSWORD: galdenar
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U galdenar -d galdenar"]
+      interval: 3s
+      retries: 20
+
+  arende-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: arende
+      POSTGRES_USER: arende
+      POSTGRES_PASSWORD: arende
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arende -d arende"]
+      interval: 3s
+      retries: 20
+
+  # ---------- Kafka (KRaft, ingen ZooKeeper) ----------
+
+  kafka:
+    image: apache/kafka:4.0.0
+    ports:
+      - "9092:9092"   # för tjänster som körs utanför Docker (./mvnw spring-boot:run)
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk   # måste vara ett base64-kodat UUID
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Ämnen skapas bara av den tjänst som äger dem (arende-service skapar arende-status med
+      # 3 partitioner). Annars kan en mottagare som startar först råka skapa ämnet med 1 partition.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      retries: 30
+
+  # ---------- Spårning ----------
+
+  jaeger:
+    image: jaegertracing/jaeger:2.5.0
+    ports:
+      - "16686:16686"   # webbgränssnittet
